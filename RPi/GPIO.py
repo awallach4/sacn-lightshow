@@ -60,17 +60,15 @@ def _render_console():
     """Renders real-time ASCII channel output smoothly using ANSI cursor repositioning."""
     lines = []
     lines.append("==================================================")
-    lines.append("      LIGHTSHOWPI / RPU GPIO EMULATOR (WINDOWS)   ")
+    lines.append("      RPi GPIO EMULATOR (WINDOWS)   ")
     lines.append("==================================================")
     
     for pin in sorted(_pins.keys()):
         raw_duty = _pins[pin]["duty_cycle"]
-        gamma_corrected = math_gamma(raw_duty / 100.0, gamma=2.8) * 100.0
-        
-        bar_length = int(gamma_corrected / 5.0)
+        bar_length = int(raw_duty / 5.0)
         bar = "█" * bar_length + "-" * (20 - bar_length)
         
-        lines.append(f"Channel Pin {pin:02d} | [{bar}] {gamma_corrected:5.1f}% (Raw: {raw_duty:3.0f}%)")
+        lines.append(f"Channel Pin {pin:02d} | [{bar}] {raw_duty:3.0f}%")
     
     lines.append("==================================================")
     
@@ -78,7 +76,3 @@ def _render_console():
     output = "\033[H" + "\n".join(lines) + "\n"
     sys.stdout.write(output)
     sys.stdout.flush()
-
-def math_gamma(val, gamma=2.8):
-    """Calculates square-law dimming response."""
-    return max(0.0, min(1.0, val)) ** gamma
