@@ -17,6 +17,5 @@ build/
 .DS_Store
 
 # Showfiles
-sequences/
-music/
+showfiles/
 config/

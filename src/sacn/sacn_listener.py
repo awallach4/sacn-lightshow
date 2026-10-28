@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 if sys.platform == "win32":
-    import RPi.GPIO as GPIO
+    import src.RPi.GPIO as GPIO
     print("[HAL] Running on Windows: Loaded local ANSI GPIO Emulator.")
 else:
     try:

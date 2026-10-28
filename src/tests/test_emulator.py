@@ -3,7 +3,7 @@ import time
 import math
 
 # Direct RPi imports to our local emulator module
-import RPi.GPIO as GPIO
+import src.RPi.GPIO as GPIO
 
 # Configure 8-Channel Layout (Standard LightShowPi BCM mapping)
 CHANNELS = [4, 17, 18, 22, 23, 24, 25, 27]
