@@ -1,7 +1,0 @@
-{
-  "1": { "pin": 4, "nondim": false },
-  "12": { "pin": 17, "nondim": false },
-  "13": { "pin": 18, "nondim": true },
-  "100": { "pin": 22, "nondim": false },
-  "101": { "pin": 23, "nondim": true }
-}

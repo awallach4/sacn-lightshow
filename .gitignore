@@ -15,3 +15,8 @@ build/
 .idea/
 *.swp
 .DS_Store
+
+# Showfiles
+sequences/
+music/
+config/
