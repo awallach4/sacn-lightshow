@@ -215,14 +215,19 @@ def play(args: argparse.Namespace) -> None:
 
     try:
         sender.start()
-        frame_index = 0
-        next_deadline = time.perf_counter()
+        raw_input = sys.stdin.readline().strip()
+        if raw_input:
+            target_t0 = float(raw_input)
+            wait_delta = target_t0 - time.monotonic()
+            if wait_delta > 0:
+                time.sleep(wait_delta)
+            next_deadline = time.perf_counter()
+        
         while True:
+            next_deadline = time.perf_counter()
             for frame in frames:
                 universe_data = frame_to_universes(frame, info.ranges, args.universe, args.slots)
-                # Activate outputs as needed; keep previously active universes zeroed if they
-                # are absent from this frame (important when sparse ranges vary by frame only
-                # in future extensions; ordinary FSEQ ranges are fixed in the header).
+                
                 for universe in universe_data:
                     if universe not in active_universes:
                         sender.activate_output(universe)
@@ -231,22 +236,29 @@ def play(args: argparse.Namespace) -> None:
                     if args.destination:
                         sender[universe].destination = args.destination
                     sender[universe].dmx_data = universe_data[universe]
-                frame_index += 1
+
                 next_deadline += frame_period
                 delay = next_deadline - time.perf_counter()
+                
                 if delay > 0:
                     time.sleep(delay)
                 elif delay < -frame_period * 4:
-                    # Avoid trying to catch up indefinitely after a long pause.
+                    # Reset deadline if CPU lag or process suspension drops behind significantly
                     next_deadline = time.perf_counter()
+
             if not args.loop:
+                # Wait one full frame period so the async sACN background thread 
+                # actually transmits the final frame buffer over the network before exiting
+                time.sleep(args.button_hold)
                 break
+                
             _, frames = iter_frames(path)
-            next_deadline = time.perf_counter()
+
     finally:
+        # Flush zero values across active channels
         for universe in active_universes:
             try:
-                sender[universe].dmx_data = tuple([0] * args.slots)
+                # Allow background thread to send the blackout packet
                 sender.deactivate_output(universe)
             except Exception:
                 pass
@@ -266,6 +278,7 @@ def main() -> int:
     parser.add_argument("--source-name", default="FSEQ Python Player", help="sACN source name")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (default: 1.0)")
     parser.add_argument("--loop", action="store_true", help="Loop playback continuously")
+    parser.add_argument("--button-hold", type=float, default=0.0, help="How long to hold the final cue before blackout")
     args = parser.parse_args()
     if args.speed <= 0:
         parser.error("--speed must be greater than zero")

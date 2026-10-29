@@ -13,6 +13,7 @@ import subprocess
 import signal
 import time
 import shutil
+import pygame
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -67,39 +68,21 @@ def play_audio(audio_file, freq, enable_speakers, ps_name):
     if IS_WINDOWS:
         print("[INFO] Windows detected: Skipping pi_fm_rds RF hardware generation.")
 
-        sox_path = shutil.which("sox")
+        os.environ['SDL_AUDIODRIVER'] = 'directsound'
+        pygame.mixer.pre_init(44100, -16, 2, 512)
+        pygame.mixer.init()
+        pygame.mixer.music.load(abs_audio_path)
 
-        if sox_path:
-            cmd = [
-                "sox", "-q",
-                "--buffer", "1024",
-                abs_audio_path,
-                "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw", "default",
-                "remix", "1,2",
-                "gain", "-1"
-            ]
-            proc = subprocess.Popen(cmd)
-            processes.append(proc)
-            proc.wait()
-        else:
-            ps_script = f"""
-            Add-Type -AssemblyName presentationCore;
-            $mediaPlayer = New-Object System.Windows.Media.MediaPlayer;
-            $mediaPlayer.Open([System.Uri]'{abs_audio_path}');
-            $mediaPlayer.Play();
-            Start-Sleep -s 1;
-            while ($mediaPlayer.NaturalDuration.HasTimeSpan -and ($mediaPlayer.Position -lt $mediaPlayer.NaturalDuration.TimeSpan)) {{
-                Start-Sleep -m 250;
-            }}
-            """
-            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script]
-            proc = subprocess.Popen(cmd)
-            proc.wait()
+        raw_input = sys.stdin.readline().strip()
+        target_t0 = float(raw_input)
 
-        if proc.returncode == 0:
-            print("[INFO] Verification: Speaker playback completed successfully.")
-        else:
-            print(f"[WARN] SoX exited with code {proc.returncode}.  Verify SoX is added to Windows PATH.", file=sys.stderr)
+        wait_delta = target_t0 - time.monotonic()
+        if wait_delta > 0:
+            time.sleep(wait_delta)
+
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(30)
     else:
         processes = []
         try:
