@@ -34,9 +34,9 @@ useSeoMeta({
         <AppHeader :links="navLinks" />
         <UMain class="relative">
           <RouterView v-slot="{ Component }">
-            <tranition name="fade">
+            <Transition name="fade" mode="out-in">
               <component :is="Component" />
-            </tranition>
+            </Transition>
           </RouterView>
         </UMain>
       </UContainer>
@@ -45,12 +45,12 @@ useSeoMeta({
 </template>
 
 <style scoped>
-.page-enter-active,
-.page-leave-active {
+.fade-enter-active,
+.fade-leave-active {
   transition: all 0.4s;
 }
-.page-enter-from,
-.page-leave-to {
+.fade-enter-from,
+.fade-leave-to {
   opacity: 0;
   filter: blur(1rem);
 }
