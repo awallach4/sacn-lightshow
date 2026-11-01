@@ -6,8 +6,8 @@ export const navLinks: NavigationMenuItem[] = [
     to: '/',
   },
   {
-    label: 'Controls',
-    to: '/controls',
+    label: 'Console',
+    to: '/console',
   },
   {
     label: 'Playlists',

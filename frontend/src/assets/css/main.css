@@ -22,3 +22,7 @@
     background-color: #474747;
   }
 }
+
+button:hover:not(:disabled) {
+  cursor: pointer;
+}
