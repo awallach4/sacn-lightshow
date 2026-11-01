@@ -45,6 +45,20 @@ const onKeyDown = (e: KeyboardEvent) => {
     return
   }
 
+  if (e.altKey) {
+    if (e.key === '5') {
+      e.preventDefault()
+      e.stopPropagation()
+      handleKeyPress('CHAN_CHECK')
+    } else if (e.key === 'a') {
+      e.preventDefault()
+      e.stopPropagation()
+      handleKeyPress('ADDRESS')
+    }
+
+    return
+  }
+
   if (e.key >= '0' && e.key <= '9') {
     handleKeyPress(e.key)
   } else if (e.key === 'Enter') {
@@ -70,11 +84,21 @@ const onKeyDown = (e: KeyboardEvent) => {
   } else if (e.key === '-' || e.key === '_') {
     handleKeyPress('-')
   } else if (e.key === '/') {
+    e.preventDefault()
+    e.stopPropagation()
     handleKeyPress('/')
   } else if (e.key === '.') {
     handleKeyPress('.')
   } else if (e.key === 'n' || e.key === 'N') {
     handleKeyPress('SNEAK')
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    e.stopPropagation()
+    handleKeyPress('LAST')
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    e.stopPropagation()
+    handleKeyPress('NEXT')
   }
 }
 

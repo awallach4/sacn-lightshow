@@ -5,20 +5,10 @@
         v-for="btn in buttons"
         :key="btn.label"
         :class="['key-btn', btn.type]"
+        :disabled="btn.value === 'UNDO' && historyStack.length === 0"
         @click="onButtonClick($event, btn.value)"
       >
         {{ btn.label }}
-      </button>
-    </div>
-
-    <!-- Undo Action Rail -->
-    <div class="side-controls">
-      <button
-        class="key-btn undo"
-        :disabled="historyStack.length === 0"
-        @click="handleKeyPress('UNDO')"
-      >
-        Undo
       </button>
     </div>
   </div>
@@ -42,31 +32,36 @@ const buttons = [
   { label: 'Thru', value: ' THRU ', type: 'syntax' },
   { label: '-', value: ' - ', type: 'syntax' },
   { label: '/', value: '/', type: 'syntax' },
-  { label: 'Sneak', value: 'SNEAK', type: 'action' },
+  { label: 'Sneak', value: 'SNEAK', type: 'syntax' },
+  { label: 'Undo', value: 'UNDO', type: 'undo' },
 
   { label: '7', value: '7', type: 'num' },
   { label: '8', value: '8', type: 'num' },
   { label: '9', value: '9', type: 'num' },
   { label: 'Rem Dim', value: 'REMDIM', type: 'syntax' },
   { label: 'Home', value: 'HOME', type: 'syntax' },
+  { label: 'Chan Check', value: 'CHAN_CHECK', type: 'action' },
 
   { label: '4', value: '4', type: 'num' },
   { label: '5', value: '5', type: 'num' },
   { label: '6', value: '6', type: 'num' },
   { label: 'Out', value: 'OUT', type: 'action' },
   { label: 'Select Last', value: 'SELECTLAST', type: 'action' },
+  { label: 'Last', value: 'LAST', type: 'action' },
 
   { label: '1', value: '1', type: 'num' },
   { label: '2', value: '2', type: 'num' },
   { label: '3', value: '3', type: 'num' },
-  { label: 'Full', value: 'FULL', type: 'action' },
+  { label: 'Full', value: 'FULL', type: 'syntax' },
   { label: 'Select Active', value: 'SELECTACTIVE', type: 'action' },
+  { label: 'Next', value: 'NEXT', type: 'action' },
 
   { label: 'Clear', value: 'CLEAR', type: 'clear' },
   { label: '0', value: '0', type: 'num' },
   { label: '.', value: '.', type: 'num' },
   { label: 'At', value: ' AT ', type: 'syntax' },
   { label: 'Enter', value: 'ENTER', type: 'enter' },
+  { label: 'Address', value: 'ADDRESS', type: 'syntax' },
 ]
 </script>
 
@@ -79,18 +74,13 @@ const buttons = [
 
 .keypad {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 8px;
   background: #18181b;
   padding: 16px;
   border-radius: 8px;
-  width: 380px;
+  width: 456px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-}
-
-.side-controls {
-  display: flex;
-  flex-direction: column;
 }
 
 .key-btn {
@@ -142,7 +132,6 @@ const buttons = [
   background: #581c87;
   color: #e9d5ff;
   border-color: #7e22ce;
-  width: 72px;
 }
 
 .key-btn.undo:disabled {
@@ -165,9 +154,6 @@ const buttons = [
   .key-btn {
     height: 48px;
     font-size: 0.8rem;
-  }
-  .key-btn.undo {
-    width: 56px;
   }
 }
 </style>

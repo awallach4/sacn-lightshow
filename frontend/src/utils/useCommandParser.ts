@@ -4,6 +4,7 @@ import { ref, readonly, type DeepReadonly, type Ref } from 'vue'
 
 export type ChannelState = Record<number, number>
 export type ManualState = Record<number, boolean>
+export type AddressState = Record<string, number>
 
 export type SyntaxKey = ' + ' | ' - ' | '-' | ' THRU ' | ' AT ' | '/' | '.'
 export type ControlKey =
@@ -19,22 +20,33 @@ export type ControlKey =
   | 'HOME'
   | 'SELECTLAST'
   | 'SELECTACTIVE'
+  | 'NEXT'
+  | 'LAST'
+  | 'ADDRESS'
+  | 'CHAN_CHECK'
 export type DigitKey = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9'
 
 export type ConsoleKey = SyntaxKey | ControlKey | DigitKey | (string & {})
 
 export interface HistorySnapshot {
   readonly channelLevels: Readonly<ChannelState>
+  readonly addressLevels: Readonly<AddressState>
   readonly isManual: Readonly<ManualState>
   readonly selectedChannels: readonly number[]
+  readonly selectedAddresses: readonly string[]
   readonly commandText: string
 }
 
 export interface UseCommandParserReturn {
   channelLevels: Ref<ChannelState>
+  addressLevels: Ref<AddressState>
   isManual: Ref<ManualState>
   selectedChannels: Ref<number[]>
+  selectedAddresses: Ref<string[]>
   commandText: Ref<string>
+  isAddressMode: Ref<boolean>
+  isChanCheckMode: Ref<boolean>
+  chanCheckLevel: Ref<number>
   historyStack: DeepReadonly<Ref<HistorySnapshot[]>>
   isCommandCompleted: Ref<boolean>
   handleKeyPress: (key: ConsoleKey) => void
@@ -64,11 +76,17 @@ const INITIAL_CHANNELS: ChannelState = {
 }
 
 const channelLevels = ref<ChannelState>({ ...INITIAL_CHANNELS })
+const addressLevels = ref<AddressState>({})
 const isManual = ref<ManualState>({})
 const selectedChannels = ref<number[]>([])
+const selectedAddresses = ref<string[]>([])
 const commandText = ref<string>('')
 const historyStack = ref<HistorySnapshot[]>([])
 const isCommandCompleted = ref<boolean>(false)
+
+const isAddressMode = ref<boolean>(false)
+const isChanCheckMode = ref<boolean>(false)
+const chanCheckLevel = ref<number>(100)
 let lastFullClickTime = 0
 
 // --- COMPOSABLE ---
@@ -83,8 +101,10 @@ export function useCommandParser(): UseCommandParserReturn {
   const saveHistorySnapshot = (): void => {
     const snapshot: HistorySnapshot = {
       channelLevels: { ...channelLevels.value },
+      addressLevels: { ...addressLevels.value },
       isManual: { ...isManual.value },
       selectedChannels: [...selectedChannels.value],
+      selectedAddresses: [...selectedAddresses.value],
       commandText: commandText.value,
     }
 
@@ -95,14 +115,63 @@ export function useCommandParser(): UseCommandParserReturn {
     }
   }
 
+  const sneakSelectedAddresses = (targets?: string[]): void => {
+    const addrsToSneak =
+      targets ??
+      (selectedAddresses.value.length > 0
+        ? selectedAddresses.value
+        : Object.keys(addressLevels.value))
+    const nextAddressLevels: AddressState = { ...addressLevels.value }
+
+    addrsToSneak.forEach((addr: string) => {
+      delete nextAddressLevels[addr]
+    })
+
+    addressLevels.value = nextAddressLevels
+    selectedAddresses.value = []
+    isAddressMode.value = false
+  }
+
+  const exitChanCheckMode = (): void => {
+    if (!isChanCheckMode.value) return
+    isChanCheckMode.value = false
+
+    if (selectedAddresses.value.length > 0 || Object.keys(addressLevels.value).length > 0) {
+      sneakSelectedAddresses()
+    }
+
+    const nextLevels: ChannelState = { ...channelLevels.value }
+    const nextManual: ManualState = { ...isManual.value }
+    const allChannels = getChannelKeys(nextLevels)
+
+    allChannels.forEach((c: number) => {
+      nextLevels[c] = 0
+      delete nextManual[c]
+    })
+
+    channelLevels.value = nextLevels
+    isManual.value = nextManual
+  }
+
   const parseChannelSelection = (expr: string): number[] => {
     const tokens: string[] = expr
       .trim()
       .split(/\s+/)
       .filter((t: string): boolean => t.length > 0)
-    const currentSet = new Set<number>()
+    const selectionList: number[] = []
     let currentMode: '+' | '-' = '+'
     let i = 0
+
+    const addChannel = (ch: number) => {
+      const existingIdx = selectionList.indexOf(ch)
+      if (existingIdx !== -1) selectionList.splice(existingIdx, 1)
+      selectionList.push(ch)
+    }
+
+    const removeChannel = (ch: number) => {
+      const existingIdx = selectionList.indexOf(ch)
+      if (existingIdx !== -1) selectionList.splice(existingIdx, 1)
+    }
 
     while (i < tokens.length) {
       const token = tokens[i]
@@ -131,24 +200,119 @@ export function useCommandParser(): UseCommandParserReturn {
         ) {
           const endNum = parseInt(rangeToken, 10)
           if (!isNaN(endNum)) {
-            const start = Math.min(num, endNum)
-            const end = Math.max(num, endNum)
-            for (let c = start; c <= end; c++) {
-              if (currentMode === '+') currentSet.add(c)
-              else currentSet.delete(c)
+            const step = num <= endNum ? 1 : -1
+            for (let c = num; step > 0 ? c <= endNum : c >= endNum; c += step) {
+              if (currentMode === '+') addChannel(c)
+              else removeChannel(c)
             }
             i += 3
             continue
           }
         }
 
-        if (currentMode === '+') currentSet.add(num)
-        else currentSet.delete(num)
+        if (currentMode === '+') addChannel(num)
+        else removeChannel(num)
       }
       i++
     }
 
-    return Array.from(currentSet).sort((a: number, b: number) => a - b)
+    return selectionList
+  }
+
+  const parseAddressSelection = (expr: string): string[] => {
+    const cleanExpr = expr.toUpperCase().replace('ADDRESS', '').trim()
+    const tokens: string[] = cleanExpr.split(/\s+/).filter((t: string): boolean => t.length > 0)
+    const selectionList: string[] = []
+    let currentMode: '+' | '-' = '+'
+    let activeUniverse = 1
+    let i = 0
+
+    const parseAddressToken = (token: string): { universe: number; address: number } | null => {
+      if (token.includes('/')) {
+        const [uStr, aStr] = token.split('/')
+        const u = parseInt(uStr ?? '', 10)
+        const a = parseInt(aStr ?? '', 10)
+        if (!isNaN(u) && !isNaN(a)) {
+          activeUniverse = u
+          return { universe: u, address: a }
+        }
+      } else {
+        const a = parseInt(token, 10)
+        if (!isNaN(a)) {
+          return { universe: activeUniverse, address: a }
+        }
+      }
+      return null
+    }
+
+    const addAddr = (u: number, a: number) => {
+      const formatted = `${u}/${a}`
+      const existingIdx = selectionList.indexOf(formatted)
+      if (existingIdx !== -1) selectionList.splice(existingIdx, 1)
+      selectionList.push(formatted)
+    }
+
+    const removeAddr = (u: number, a: number) => {
+      const formatted = `${u}/${a}`
+      const existingIdx = selectionList.indexOf(formatted)
+      if (existingIdx !== -1) selectionList.splice(existingIdx, 1)
+    }
+
+    while (i < tokens.length) {
+      const token = tokens[i]
+      if (token === undefined) break
+
+      if (token === '+') {
+        currentMode = '+'
+        i++
+        continue
+      }
+      if (token === '-') {
+        currentMode = '-'
+        i++
+        continue
+      }
+
+      const startAddr = parseAddressToken(token)
+
+      if (startAddr !== null) {
+        const nextToken = tokens[i + 1]
+        const rangeToken = tokens[i + 2]
+
+        if (
+          nextToken !== undefined &&
+          rangeToken !== undefined &&
+          nextToken.toUpperCase() === 'THRU'
+        ) {
+          const endAddr = parseAddressToken(rangeToken)
+
+          if (endAddr !== null) {
+            const targetUniverse = rangeToken.includes('/') ? endAddr.universe : startAddr.universe
+            const step = startAddr.address <= endAddr.address ? 1 : -1
+
+            for (
+              let addrNum = startAddr.address;
+              step > 0 ? addrNum <= endAddr.address : addrNum >= endAddr.address;
+              addrNum += step
+            ) {
+              if (currentMode === '+') addAddr(targetUniverse, addrNum)
+              else removeAddr(targetUniverse, addrNum)
+            }
+
+            activeUniverse = targetUniverse
+            i += 3
+            continue
+          }
+        }
+
+        if (currentMode === '+') addAddr(startAddr.universe, startAddr.address)
+        else removeAddr(startAddr.universe, startAddr.address)
+      }
+
+      i++
+    }
+
+    return selectionList
   }
 
   const formatSelectionString = (channels: number[]): string => {
@@ -156,13 +320,17 @@ export function useCommandParser(): UseCommandParserReturn {
     return channels.join(' + ')
   }
 
-  /** Parsed intensity result specifying absolute vs relative mode */
-  interface ParsedIntensity {
-    type: 'absolute' | 'relative'
-    value: number
+  const formatAddressSelectionString = (addresses: string[]): string => {
+    if (addresses.length === 0) return ''
+    return 'ADDRESS ' + addresses.join(' + ')
   }
 
-  /** Helper to parse intensity level strings with decade rule and relative +/- support */
+  type ParsedIntensity =
+    | { type: 'absolute'; value: number }
+    | { type: 'relative'; value: number }
+    | { type: 'proportional'; factor: number }
+    | { type: 'fan'; startValue: number; endValue: number }
+
   const parseIntensityLevel = (levelStr: string): ParsedIntensity | null => {
     const trimmed = levelStr.trim().toUpperCase()
     if (trimmed.length === 0) return null
@@ -171,7 +339,37 @@ export function useCommandParser(): UseCommandParserReturn {
       return { type: 'absolute', value: 100 }
     }
 
-    // Relative level offset detection: AT + 10, AT - 20, AT + 1, AT - 5
+    if (trimmed.startsWith('/')) {
+      const numPart = trimmed.slice(1).trim()
+      if (numPart.length === 0) return { type: 'proportional', factor: 1.0 }
+
+      let divisor = 1.0
+
+      if (numPart.includes('.')) {
+        const parsedFloat = parseFloat(numPart)
+        divisor = isNaN(parsedFloat) || parsedFloat === 0 ? 1.0 : Math.max(0.01, parsedFloat)
+      } else if (/^[0-9]$/.test(numPart)) {
+        divisor = parseInt(numPart, 10)
+        if (divisor === 0) divisor = 1.0
+      } else {
+        const parsedInt = parseInt(numPart, 10)
+        divisor = isNaN(parsedInt) || parsedInt === 0 ? 1.0 : Math.max(0.01, parsedInt)
+      }
+
+      return { type: 'proportional', factor: 1 / divisor }
+    }
+
+    if (trimmed.includes('THRU')) {
+      const parts = trimmed.split('THRU').map((p) => p.trim())
+      const startParsed = parseIntensityLevel(parts[0] ?? '')
+      const endParsed = parseIntensityLevel(parts[1] ?? '')
+
+      const startVal = startParsed && 'value' in startParsed ? startParsed.value : 0
+      const endVal = endParsed && 'value' in endParsed ? endParsed.value : 100
+
+      return { type: 'fan', startValue: startVal, endValue: endVal }
+    }
+
     if (trimmed.startsWith('+') || trimmed.startsWith('-')) {
       const sign = trimmed.startsWith('+') ? 1 : -1
       const numPart = trimmed.slice(1).trim()
@@ -189,34 +387,202 @@ export function useCommandParser(): UseCommandParserReturn {
       return { type: 'relative', value: sign * delta }
     }
 
-    // Single digit decade rule: AT 5 -> 50%
     if (/^[0-9]$/.test(trimmed)) {
       return { type: 'absolute', value: parseInt(trimmed, 10) * 10 }
     }
 
-    // Explicit two/three digit absolute level: AT 05 -> 5%, AT 75 -> 75%
     const parsedVal = parseInt(trimmed, 10)
     if (isNaN(parsedVal)) return null
     return { type: 'absolute', value: Math.min(100, Math.max(0, parsedVal)) }
+  }
+
+  const applyIntensityToValue = (
+    currentVal: number,
+    intensity: ParsedIntensity,
+    indexInSelection: number,
+    totalSelected: number,
+  ): number => {
+    switch (intensity.type) {
+      case 'absolute':
+        return intensity.value
+      case 'relative':
+        return Math.min(100, Math.max(0, currentVal + intensity.value))
+      case 'proportional':
+        return Math.min(100, Math.max(0, Math.round(currentVal * intensity.factor)))
+      case 'fan': {
+        if (totalSelected <= 1) return intensity.startValue
+        const step = (intensity.endValue - intensity.startValue) / (totalSelected - 1)
+        return Math.min(
+          100,
+          Math.max(0, Math.round(intensity.startValue + step * indexInSelection)),
+        )
+      }
+    }
+  }
+
+  const executeChanCheckStep = (targetChan: number): void => {
+    const nextLevels: ChannelState = { ...channelLevels.value }
+    const nextManual: ManualState = { ...isManual.value }
+    const allChannels = getChannelKeys(nextLevels)
+
+    allChannels.forEach((c: number) => {
+      if (c === targetChan) {
+        nextLevels[c] = chanCheckLevel.value
+        nextManual[c] = true
+      } else {
+        nextLevels[c] = 0
+        delete nextManual[c]
+      }
+    })
+
+    channelLevels.value = nextLevels
+    isManual.value = nextManual
+    selectedChannels.value = [targetChan]
+    commandText.value = `${targetChan}`
+  }
+
+  const executeAddressCheckStep = (targetAddr: string): void => {
+    const nextAddressLevels: AddressState = {}
+    nextAddressLevels[targetAddr] = chanCheckLevel.value
+
+    addressLevels.value = nextAddressLevels
+    selectedAddresses.value = [targetAddr]
+    isAddressMode.value = true
+    commandText.value = `ADDRESS ${targetAddr}`
   }
 
   const evaluateCommand = (rawCmd: string): void => {
     const cmd = rawCmd.trim()
     if (!cmd) return
 
-    // --- COMBINED AT LEVEL REMDIM / REMDIM EVALUATION ---
+    // --- ADDRESS MODE EVALUATION ---
+    if (cmd.startsWith('ADDRESS') || isAddressMode.value) {
+      if (cmd.includes('CHAN_CHECK')) {
+        let selectionPart = ''
+        let levelPart = ''
+
+        if (cmd.includes('AT')) {
+          const atParts = cmd.replace('ADDRESS', '').split('AT')
+          selectionPart = atParts[0] ?? ''
+          levelPart = (atParts[1] ?? '').split('CHAN_CHECK')[0] ?? ''
+        } else {
+          selectionPart = cmd.replace('ADDRESS', '').split('CHAN_CHECK')[0] ?? ''
+        }
+
+        const targets =
+          selectionPart.trim().length > 0
+            ? parseAddressSelection(selectionPart)
+            : [...selectedAddresses.value]
+        const targetAddr = targets[0] ?? '1/1'
+
+        const parsedIntensity = parseIntensityLevel(levelPart)
+        chanCheckLevel.value =
+          parsedIntensity && 'value' in parsedIntensity ? parsedIntensity.value : 100
+
+        isAddressMode.value = true
+        isChanCheckMode.value = true
+        executeAddressCheckStep(targetAddr)
+        isCommandCompleted.value = true
+        return
+      }
+
+      if (cmd.includes('SNEAK')) {
+        const parts = cmd.replace('ADDRESS', '').split('SNEAK')
+        const selectionPart = parts[0] ?? ''
+        const targets =
+          selectionPart.trim().length > 0 ? parseAddressSelection(selectionPart) : undefined
+        sneakSelectedAddresses(targets)
+        commandText.value = ''
+        isCommandCompleted.value = true
+        return
+      }
+
+      const parts = cmd.replace('ADDRESS', '').trim().split('AT')
+      const targetStr = parts[0] ?? ''
+      const levelStr = parts[1] ?? ''
+
+      const targets =
+        targetStr.trim().length > 0
+          ? parseAddressSelection(targetStr)
+          : [...selectedAddresses.value]
+
+      const intensity = parseIntensityLevel(levelStr) ?? { type: 'absolute', value: 0 }
+
+      if (targets.length > 0) {
+        const nextAddressLevels: AddressState = { ...addressLevels.value }
+
+        targets.forEach((addr: string, idx: number) => {
+          const levelVal = applyIntensityToValue(
+            nextAddressLevels[addr] ?? 0,
+            intensity,
+            idx,
+            targets.length,
+          )
+          if (levelVal > 0) {
+            nextAddressLevels[addr] = levelVal
+          } else {
+            delete nextAddressLevels[addr]
+          }
+        })
+
+        addressLevels.value = nextAddressLevels
+        selectedAddresses.value = targets
+        selectedChannels.value = []
+        commandText.value = formatAddressSelectionString(targets)
+      }
+
+      isAddressMode.value = true
+      isCommandCompleted.value = true
+      return
+    }
+
+    // --- CHANNEL CHECK SYNTAX EVALUATION ---
+    if (cmd.includes('CHAN_CHECK')) {
+      let selectionPart = ''
+      let levelPart = ''
+
+      if (cmd.includes('AT')) {
+        const atParts = cmd.split('AT')
+        selectionPart = atParts[0] ?? ''
+        levelPart = (atParts[1] ?? '').split('CHAN_CHECK')[0] ?? ''
+      } else {
+        selectionPart = cmd.split('CHAN_CHECK')[0] ?? ''
+      }
+
+      const targets =
+        selectionPart.trim().length > 0
+          ? parseChannelSelection(selectionPart)
+          : [...selectedChannels.value]
+      const targetChan = targets[0] ?? 1
+
+      const parsedIntensity = parseIntensityLevel(levelPart)
+      chanCheckLevel.value =
+        parsedIntensity && 'value' in parsedIntensity ? parsedIntensity.value : 100
+
+      isChanCheckMode.value = true
+      executeChanCheckStep(targetChan)
+      isCommandCompleted.value = true
+      return
+    }
+
+    // --- COMBINED AT LEVEL REMDIM EVALUATION ---
     if (cmd.includes('REMDIM')) {
       const hasAt = cmd.includes('AT')
       let selectionPart = ''
       let levelPart = ''
+      let remDimBackgroundPart = ''
 
       if (hasAt) {
         const atParts = cmd.split('AT')
         selectionPart = atParts[0] ?? ''
         const remainder = atParts[1] ?? ''
-        levelPart = remainder.split('REMDIM')[0] ?? ''
+        const remDimParts = remainder.split('REMDIM')
+        levelPart = remDimParts[0] ?? ''
+        remDimBackgroundPart = remDimParts[1] ?? ''
       } else {
-        selectionPart = cmd.split('REMDIM')[0] ?? ''
+        const remDimParts = cmd.split('REMDIM')
+        selectionPart = remDimParts[0] ?? ''
+        remDimBackgroundPart = remDimParts[1] ?? ''
       }
 
       const activeTargets: number[] =
@@ -228,21 +594,26 @@ export function useCommandParser(): UseCommandParserReturn {
         const nextLevels: ChannelState = { ...channelLevels.value }
         const nextManual: ManualState = { ...isManual.value }
         const allChannels = getChannelKeys(nextLevels)
-        const intensity = parseIntensityLevel(levelPart)
+
+        const targetIntensity = parseIntensityLevel(levelPart)
+        const backgroundIntensity = parseIntensityLevel(remDimBackgroundPart)
+        const bgLevel =
+          backgroundIntensity && 'value' in backgroundIntensity ? backgroundIntensity.value : 0
 
         allChannels.forEach((chan: number) => {
           if (activeTargets.includes(chan)) {
-            if (intensity !== null) {
-              if (intensity.type === 'relative') {
-                const current = nextLevels[chan] ?? 0
-                nextLevels[chan] = Math.min(100, Math.max(0, current + intensity.value))
-              } else {
-                nextLevels[chan] = intensity.value
-              }
+            if (targetIntensity !== null) {
+              const idx = activeTargets.indexOf(chan)
+              nextLevels[chan] = applyIntensityToValue(
+                nextLevels[chan] ?? 0,
+                targetIntensity,
+                idx,
+                activeTargets.length,
+              )
               nextManual[chan] = true
             }
           } else {
-            nextLevels[chan] = 0
+            nextLevels[chan] = bgLevel
             nextManual[chan] = true
           }
         })
@@ -250,6 +621,7 @@ export function useCommandParser(): UseCommandParserReturn {
         channelLevels.value = nextLevels
         isManual.value = nextManual
         selectedChannels.value = activeTargets
+        if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
         commandText.value = formatSelectionString(activeTargets)
       }
       isCommandCompleted.value = true
@@ -287,7 +659,7 @@ export function useCommandParser(): UseCommandParserReturn {
       return
     }
 
-    // --- STANDARD / RELATIVE AT LEVEL EVALUATION ---
+    // --- STANDARD / RELATIVE / PROPORTIONAL / FANNING AT LEVEL EVALUATION ---
     if (cmd.includes('AT')) {
       const parts: string[] = cmd.split('AT')
       const selectionPart = parts[0] ?? ''
@@ -304,29 +676,31 @@ export function useCommandParser(): UseCommandParserReturn {
         const nextLevels: ChannelState = { ...channelLevels.value }
         const nextManual: ManualState = { ...isManual.value }
 
-        targetChannels.forEach((chan: number) => {
-          if (intensity.type === 'relative') {
-            const current = nextLevels[chan] ?? 0
-            nextLevels[chan] = Math.min(100, Math.max(0, current + intensity.value))
-          } else {
-            nextLevels[chan] = intensity.value
-          }
+        targetChannels.forEach((chan: number, idx: number) => {
+          nextLevels[chan] = applyIntensityToValue(
+            nextLevels[chan] ?? 0,
+            intensity,
+            idx,
+            targetChannels.length,
+          )
           nextManual[chan] = true
         })
 
         channelLevels.value = nextLevels
         isManual.value = nextManual
         selectedChannels.value = targetChannels
+        if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
         commandText.value = formatSelectionString(targetChannels)
       }
       isCommandCompleted.value = true
       return
     }
 
-    const targets: number[] = parseChannelSelection(cmd)
-    if (targets.length > 0) {
-      selectedChannels.value = targets
-      commandText.value = formatSelectionString(targets)
+    const parsedTargets = parseChannelSelection(cmd)
+    if (parsedTargets.length > 0) {
+      selectedChannels.value = parsedTargets
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+      commandText.value = formatSelectionString(parsedTargets)
     }
     isCommandCompleted.value = true
   }
@@ -334,7 +708,17 @@ export function useCommandParser(): UseCommandParserReturn {
   const evaluateSelectionOnly = (cmdStr: string): void => {
     const cleanStr = cmdStr.trim()
     if (!cleanStr) {
-      selectedChannels.value = []
+      if (isAddressMode.value) selectedAddresses.value = []
+      else selectedChannels.value = []
+      return
+    }
+
+    if (cleanStr.startsWith('ADDRESS') || isAddressMode.value) {
+      const selectionPart = cleanStr.replace('ADDRESS', '').split('AT')[0] ?? ''
+      if (selectionPart.trim().length > 0) {
+        selectedAddresses.value = parseAddressSelection(selectionPart)
+        selectedChannels.value = []
+      }
       return
     }
 
@@ -345,40 +729,182 @@ export function useCommandParser(): UseCommandParserReturn {
       selectionPart = cleanStr.split('SNEAK')[0] ?? ''
     } else if (cleanStr.includes('REMDIM')) {
       selectionPart = cleanStr.split('REMDIM')[0] ?? ''
+    } else if (cleanStr.includes('CHAN_CHECK')) {
+      selectionPart = cleanStr.split('CHAN_CHECK')[0] ?? ''
     }
 
     if (selectionPart.trim().length > 0) {
-      const targets: number[] = parseChannelSelection(selectionPart)
-      selectedChannels.value = targets
+      selectedChannels.value = parseChannelSelection(selectionPart)
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
     }
   }
 
   const handleKeyPress = (key: ConsoleKey): void => {
-    const line = commandText.value
+    // Exits channel check mode on keys other than NEXT / LAST
+    if (isChanCheckMode.value && key !== 'NEXT' && key !== 'LAST') {
+      exitChanCheckMode()
+    }
+
+    const isSelectionModifierKey =
+      key === 'AT' ||
+      key === ' AT ' ||
+      key === 'ENTER' ||
+      key === '+' ||
+      key === ' + ' ||
+      key === '-' ||
+      key === ' - ' ||
+      key === 'THRU' ||
+      key === ' THRU ' ||
+      key === '/' ||
+      key === 'FULL' ||
+      key === 'FULL_FULL' ||
+      key === 'OUT' ||
+      /^[0-9]$/.test(key)
+
+    if (
+      isAddressMode.value &&
+      isCommandCompleted.value &&
+      !isSelectionModifierKey &&
+      key !== 'NEXT' &&
+      key !== 'LAST'
+    ) {
+      sneakSelectedAddresses()
+    }
+
+    if (key === 'ENTER') {
+      if (!isCommandCompleted.value && commandText.value.trim().length > 0) {
+        saveHistorySnapshot()
+        evaluateCommand(commandText.value)
+      } else if (selectedAddresses.value.length > 0 && isAddressMode.value) {
+        commandText.value = formatAddressSelectionString(selectedAddresses.value)
+      } else if (selectedChannels.value.length > 0) {
+        commandText.value = formatSelectionString(selectedChannels.value)
+      }
+      isCommandCompleted.value = true
+      return
+    }
+
+    if (key === 'NEXT' || key === 'LAST') {
+      if (isChanCheckMode.value) {
+        saveHistorySnapshot()
+
+        // ADDRESS CHECK STEPPING
+        if (
+          isAddressMode.value ||
+          selectedAddresses.value.length > 0 ||
+          Object.keys(addressLevels.value).length > 0
+        ) {
+          const activeKeys = Object.keys(addressLevels.value)
+          const currentAddrStr = selectedAddresses.value[0] ?? activeKeys[0] ?? '1/1'
+          let universe = 1
+          let currentAddrNum = 1
+
+          if (currentAddrStr.includes('/')) {
+            const [uStr, aStr] = currentAddrStr.split('/')
+            universe = parseInt(uStr ?? '1', 10)
+            currentAddrNum = parseInt(aStr ?? '1', 10)
+          } else {
+            currentAddrNum = parseInt(currentAddrStr, 10)
+          }
+
+          let nextAddrNum = key === 'NEXT' ? currentAddrNum + 1 : currentAddrNum - 1
+          if (nextAddrNum > 512) nextAddrNum = 1
+          if (nextAddrNum < 1) nextAddrNum = 512
+
+          executeAddressCheckStep(`${universe}/${nextAddrNum}`)
+          return
+        }
+
+        // CHANNEL CHECK STEPPING
+        const currentChan = selectedChannels.value[0] ?? 1
+        const allChannels = getChannelKeys(channelLevels.value)
+        const maxChan = Math.max(...allChannels, 16)
+
+        let nextChan = key === 'NEXT' ? currentChan + 1 : currentChan - 1
+        if (nextChan > maxChan) nextChan = 1
+        if (nextChan < 1) nextChan = maxChan
+
+        executeChanCheckStep(nextChan)
+        return
+      }
+
+      // STANDARD NEXT / LAST OUTSIDE CHECK MODE
+      const currentChans =
+        selectedChannels.value.length > 0
+          ? selectedChannels.value
+          : commandText.value.trim().length > 0
+            ? parseChannelSelection(commandText.value)
+            : [1]
+
+      const refChan = key === 'NEXT' ? Math.max(...currentChans) : Math.min(...currentChans)
+
+      const targetChan = key === 'NEXT' ? refChan + 1 : Math.max(1, refChan - 1)
+
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+      selectedChannels.value = [targetChan]
+      commandText.value = `${targetChan}`
+      isAddressMode.value = false
+      isCommandCompleted.value = false
+      return
+    }
+
+    if (key === 'ADDRESS') {
+      isAddressMode.value = true
+      if (isCommandCompleted.value || !commandText.value.startsWith('ADDRESS')) {
+        commandText.value = 'ADDRESS '
+        isCommandCompleted.value = false
+      }
+      return
+    }
 
     if (key === 'HARD_CLEAR') {
+      if (selectedAddresses.value.length > 0 || Object.keys(addressLevels.value).length > 0) {
+        sneakSelectedAddresses()
+      }
       commandText.value = ''
       selectedChannels.value = []
+      selectedAddresses.value = []
+      isAddressMode.value = false
       isCommandCompleted.value = false
       return
     }
 
     if (key === 'CLEAR') {
-      if (isCommandCompleted.value || line.length === 0) {
+      if (
+        selectedAddresses.value.length > 0 ||
+        (isCommandCompleted.value && commandText.value.startsWith('ADDRESS'))
+      ) {
+        saveHistorySnapshot()
+        sneakSelectedAddresses()
         commandText.value = ''
-        selectedChannels.value = []
+        selectedAddresses.value = []
+        isAddressMode.value = false
         isCommandCompleted.value = false
         return
       }
 
-      const trimmed = line.trimEnd()
+      if (isCommandCompleted.value || commandText.value.length === 0) {
+        commandText.value = ''
+        selectedChannels.value = []
+        selectedAddresses.value = []
+        isAddressMode.value = false
+        isCommandCompleted.value = false
+        return
+      }
+
+      const trimmed = commandText.value.trimEnd()
       const lastSpaceIndex = trimmed.lastIndexOf(' ')
 
       if (lastSpaceIndex === -1) {
         commandText.value = ''
         selectedChannels.value = []
+        selectedAddresses.value = []
+        isAddressMode.value = false
       } else {
-        commandText.value = line.substring(0, lastSpaceIndex + 1)
+        commandText.value = commandText.value.substring(0, lastSpaceIndex + 1)
+        if (!commandText.value.includes('ADDRESS')) {
+          isAddressMode.value = false
+        }
         evaluateSelectionOnly(commandText.value)
       }
 
@@ -391,29 +917,63 @@ export function useCommandParser(): UseCommandParserReturn {
       if (lastSnapshot !== undefined) {
         historyStack.value = historyStack.value.slice(0, -1)
         channelLevels.value = { ...lastSnapshot.channelLevels }
+        addressLevels.value = { ...lastSnapshot.addressLevels }
         isManual.value = { ...lastSnapshot.isManual }
         selectedChannels.value = [...lastSnapshot.selectedChannels]
+        selectedAddresses.value = [...lastSnapshot.selectedAddresses]
         commandText.value = lastSnapshot.commandText
+        isAddressMode.value = commandText.value.startsWith('ADDRESS')
         isCommandCompleted.value = false
       }
       return
     }
 
-    if (key === 'ENTER') {
-      if (line.trim().length > 0) {
-        saveHistorySnapshot()
-        evaluateCommand(line)
+    if (isCommandCompleted.value) {
+      if (/^[0-9]/.test(key)) {
+        if (!isAddressMode.value) {
+          if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+          commandText.value = key
+          isCommandCompleted.value = false
+          evaluateSelectionOnly(key)
+          return
+        }
+      }
+      isCommandCompleted.value = false
+    }
+
+    const line = commandText.value
+
+    if (key === 'CHAN_CHECK') {
+      if (isAddressMode.value || selectedAddresses.value.length > 0 || line.startsWith('ADDRESS')) {
+        if (isCommandCompleted.value) {
+          commandText.value = formatAddressSelectionString(selectedAddresses.value) + ' CHAN_CHECK '
+          isCommandCompleted.value = false
+        } else {
+          commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'ADDRESS CHAN_CHECK '
+        }
+        return
+      }
+
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+      isAddressMode.value = false
+      selectedAddresses.value = []
+      if (isCommandCompleted.value) {
+        commandText.value = formatSelectionString(selectedChannels.value) + ' CHAN_CHECK '
+        isCommandCompleted.value = false
+      } else {
+        commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'CHAN_CHECK '
       }
       return
     }
 
-    // --- SMART MINUS OPERATOR (RANGE VS RELATIVE INTENSITY) ---
     if (key === ' - ' || key === '-') {
+      const prefix = isAddressMode.value
+        ? formatAddressSelectionString(selectedAddresses.value)
+        : formatSelectionString(selectedChannels.value)
       if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' - '
+        commandText.value = prefix + ' - '
         isCommandCompleted.value = false
       } else if (line.endsWith('AT') || line.endsWith('AT ')) {
-        // Appends relative minus to AT clause: "1 AT -"
         commandText.value = line.trimEnd() + ' -'
       } else {
         commandText.value += ' - '
@@ -421,16 +981,43 @@ export function useCommandParser(): UseCommandParserReturn {
       return
     }
 
-    // --- SMART PLUS OPERATOR (RANGE VS RELATIVE INTENSITY) ---
     if (key === ' + ' || key === '+') {
+      const prefix = isAddressMode.value
+        ? formatAddressSelectionString(selectedAddresses.value)
+        : formatSelectionString(selectedChannels.value)
       if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' + '
+        commandText.value = prefix + ' + '
         isCommandCompleted.value = false
       } else if (line.endsWith('AT') || line.endsWith('AT ')) {
-        // Appends relative plus to AT clause: "1 AT +"
         commandText.value = line.trimEnd() + ' +'
       } else {
         commandText.value += ' + '
+      }
+      return
+    }
+
+    if (key === ' THRU ' || key === 'THRU') {
+      const prefix = isAddressMode.value
+        ? formatAddressSelectionString(selectedAddresses.value)
+        : formatSelectionString(selectedChannels.value)
+      if (isCommandCompleted.value) {
+        commandText.value = prefix + ' THRU '
+        isCommandCompleted.value = false
+      } else {
+        commandText.value += ' THRU '
+      }
+      return
+    }
+
+    if (key === '/') {
+      const prefix = isAddressMode.value
+        ? formatAddressSelectionString(selectedAddresses.value)
+        : formatSelectionString(selectedChannels.value)
+      if (isCommandCompleted.value) {
+        commandText.value = prefix + ' / '
+        isCommandCompleted.value = false
+      } else {
+        commandText.value += '/'
       }
       return
     }
@@ -443,15 +1030,24 @@ export function useCommandParser(): UseCommandParserReturn {
       if (isDoubleTap) {
         saveHistorySnapshot()
         const targetStr =
-          line.trim().length > 0 ? line : formatSelectionString(selectedChannels.value)
+          line.trim().length > 0
+            ? line
+            : isAddressMode.value
+              ? formatAddressSelectionString(selectedAddresses.value)
+              : formatSelectionString(selectedChannels.value)
         if (targetStr.length > 0) {
           evaluateCommand(`${targetStr} AT FULL`)
         }
         return
       } else {
         if (isCommandCompleted.value) {
-          commandText.value = formatSelectionString(selectedChannels.value) + ' AT FULL'
+          const prefix = isAddressMode.value
+            ? formatAddressSelectionString(selectedAddresses.value)
+            : formatSelectionString(selectedChannels.value)
+          commandText.value = prefix + ' AT FULL'
           isCommandCompleted.value = false
+        } else if (line.endsWith('THRU') || line.endsWith('THRU ')) {
+          commandText.value = line.trimEnd() + ' FULL'
         } else if (line.endsWith('AT') || line.endsWith('AT ')) {
           commandText.value = line.trimEnd() + ' FULL'
         } else if (!line.includes('AT')) {
@@ -463,7 +1059,10 @@ export function useCommandParser(): UseCommandParserReturn {
 
     if (key === ' AT ' || key === 'AT') {
       if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' AT '
+        const prefix = isAddressMode.value
+          ? formatAddressSelectionString(selectedAddresses.value)
+          : formatSelectionString(selectedChannels.value)
+        commandText.value = prefix + ' AT '
         isCommandCompleted.value = false
       } else if (!line.includes('AT')) {
         commandText.value = line.length > 0 ? line + ' AT ' : 'AT '
@@ -474,7 +1073,11 @@ export function useCommandParser(): UseCommandParserReturn {
     if (key === 'OUT') {
       saveHistorySnapshot()
       const targetStr =
-        line.trim().length > 0 ? line : formatSelectionString(selectedChannels.value)
+        line.trim().length > 0
+          ? line
+          : isAddressMode.value
+            ? formatAddressSelectionString(selectedAddresses.value)
+            : formatSelectionString(selectedChannels.value)
       if (targetStr.length > 0) {
         evaluateCommand(`${targetStr} AT 0`)
       }
@@ -483,7 +1086,10 @@ export function useCommandParser(): UseCommandParserReturn {
 
     if (key === 'SNEAK') {
       if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' SNEAK'
+        const prefix = isAddressMode.value
+          ? formatAddressSelectionString(selectedAddresses.value)
+          : formatSelectionString(selectedChannels.value)
+        commandText.value = prefix + ' SNEAK'
         isCommandCompleted.value = false
       } else {
         commandText.value = line.length > 0 ? line + ' SNEAK' : 'SNEAK'
@@ -493,10 +1099,13 @@ export function useCommandParser(): UseCommandParserReturn {
 
     if (key === 'REMDIM') {
       if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' REMDIM'
+        const prefix = isAddressMode.value
+          ? formatAddressSelectionString(selectedAddresses.value)
+          : formatSelectionString(selectedChannels.value)
+        commandText.value = prefix + ' REMDIM '
         isCommandCompleted.value = false
       } else {
-        commandText.value = line.length > 0 ? line + ' REMDIM' : 'REMDIM'
+        commandText.value = line.length > 0 ? line + ' REMDIM ' : 'REMDIM '
       }
       return
     }
@@ -506,6 +1115,7 @@ export function useCommandParser(): UseCommandParserReturn {
       if (lastSnapshot !== undefined) {
         selectedChannels.value = [...lastSnapshot.selectedChannels]
         commandText.value = formatSelectionString(selectedChannels.value)
+        isAddressMode.value = false
         isCommandCompleted.value = false
       }
       return
@@ -520,20 +1130,10 @@ export function useCommandParser(): UseCommandParserReturn {
       if (activeChans.length > 0) {
         selectedChannels.value = activeChans
         commandText.value = formatSelectionString(activeChans)
+        isAddressMode.value = false
         isCommandCompleted.value = false
       }
       return
-    }
-
-    if (isCommandCompleted.value) {
-      if (/^[0-9]/.test(key)) {
-        commandText.value = key
-        isCommandCompleted.value = false
-        evaluateSelectionOnly(key)
-        return
-      } else {
-        isCommandCompleted.value = false
-      }
     }
 
     commandText.value += key
@@ -542,9 +1142,14 @@ export function useCommandParser(): UseCommandParserReturn {
 
   return {
     channelLevels,
+    addressLevels,
     isManual,
     selectedChannels,
+    selectedAddresses,
     commandText,
+    isAddressMode,
+    isChanCheckMode,
+    chanCheckLevel,
     historyStack: readonly(historyStack),
     isCommandCompleted,
     handleKeyPress,
