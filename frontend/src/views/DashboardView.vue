@@ -153,7 +153,7 @@ useSeoMeta({
           </UBadge>
           <div v-for="(value, key) in node_status" :key="key">
             <div
-              class="flex justify-between items-center py-1 px-4 rounded-lg my-1"
+              class="flex justify-between items-center py-1 px-4 rounded-lg my-1 text-neutral-200"
               :class="isBackendConnected && value ? 'bg-green-800/80' : 'bg-red-800/80'"
             >
               <span>{{ key }}</span>
@@ -169,7 +169,7 @@ useSeoMeta({
         <!-- Show Macros -->
         <UPageCard title="Show Macros" variant="subtle">
           <UButton
-            class="justify-center"
+            class="justify-center text-neutral-900"
             :loading="isMacroLoading.start_show"
             :disabled="current_song.length > 0"
             @click="sendMacro('start_show')"
@@ -200,7 +200,7 @@ useSeoMeta({
 
           <UButton
             color="info"
-            class="justify-center"
+            class="justify-center text-neutral-900"
             :loading="isMacroLoading.all_on"
             @click="sendMacro('all_on')"
           >
@@ -208,7 +208,7 @@ useSeoMeta({
           </UButton>
           <UButton
             color="error"
-            class="justify-center"
+            class="justify-center text-neutral-900"
             :loading="isMacroLoading.blackout"
             @click="sendMacro('blackout')"
           >
@@ -236,7 +236,7 @@ useSeoMeta({
           <div class="flex flex-col justify-between gap-4">
             <UButton
               color="warning"
-              class="justify-center"
+              class="justify-center text-neutral-900"
               :loading="isMacroLoading.panic"
               @click="sendMacro('panic')"
             >
@@ -252,7 +252,7 @@ useSeoMeta({
             </UButton>
             <UButton
               color="error"
-              class="justify-center"
+              class="justify-center text-neutral-900"
               :loading="isHostLoading.shutdown"
               @click="executeHostAction('shutdown')"
             >
