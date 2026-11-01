@@ -26,6 +26,10 @@ CMD_FILE_PATH = IPC_DIR / "show_macro_cmd.json"
 app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
 CORS(app)  # Allows Vite dev server (http://localhost:5173) to query API directly
 
+###############################################################################
+#                           Dashboard Backend                                 #
+###############################################################################
+
 # Cross-platform CPU temperature reader
 def get_cpu_temp() -> float:
     if IS_WINDOWS:
@@ -153,6 +157,153 @@ def host_control(command):
         return jsonify({"status": "success", "message": f"Host {command} sequence initiated"}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to execute host action: {str(e)}"}), 500
+
+###############################################################################
+#                          Playlist Editor Backend                            #
+###############################################################################
+
+from werkzeug.utils import secure_filename
+
+# Resolve base directories for sacn-lightshow layout
+SHOWFILES_DIR = PROJECT_ROOT  / "showfiles"
+MUSIC_DIR = SHOWFILES_DIR / "music"
+SEQUENCES_DIR = SHOWFILES_DIR / "sequences"
+CONFIG_DIR = PROJECT_ROOT / "config"
+PLAYLIST_JSON_PATH = CONFIG_DIR / "playlist.json"
+
+# Ensure target directories exist on server start
+MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+SEQUENCES_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Helper to load playlist structure safely
+def load_playlists_data() -> dict:
+    if PLAYLIST_JSON_PATH.is_file():
+        try:
+            with open(PLAYLIST_JSON_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Default fallback structure if file is missing or unparseable
+    return {"playlists": {}}
+
+# -------------------------------------------------------------------
+# GET / POST: Raw playlist.json management
+# -------------------------------------------------------------------
+@app.route("/api/playlist/config", methods=["GET"])
+def get_playlist_config():
+    """Returns the contents of playlist.json for the frontend editor."""
+    if not PLAYLIST_JSON_PATH.is_file():
+        default_config = {"playlists": {"playlist": [], "playlist 2": []}}
+        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(default_config, f, indent=2)
+        return jsonify({"content": json.dumps(default_config, indent=2)}), 200
+
+    try:
+        with open(PLAYLIST_JSON_PATH, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+        return jsonify({"content": raw_text}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to read playlist config: {str(e)}"}), 500
+
+
+@app.route("/api/playlist/config", methods=["POST"])
+def save_playlist_config():
+    """Saves raw text content back to playlist.json after verifying JSON syntax."""
+    payload = request.get_json() or {}
+    raw_content = payload.get("content", "")
+
+    # Validate JSON syntax before overwriting
+    try:
+        parsed_data = json.loads(raw_content)
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Invalid JSON syntax: {str(e)}"}), 400
+
+    try:
+        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(parsed_data, f, indent=2)
+        return jsonify({"status": "success", "message": "playlist.json saved successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to write playlist config: {str(e)}"}), 500
+
+
+# -------------------------------------------------------------------
+# POST: File Upload and Auto-Playlist Assignment
+# -------------------------------------------------------------------
+@app.route("/api/playlist/upload", methods=["POST"])
+def upload_show_files():
+    """Handles audio + sequence upload, overwriting files and updating playlist entries."""
+    if "audio" not in request.files or "lights" not in request.files:
+        return jsonify({"error": "Missing audio or sequence file in request"}), 400
+
+    audio_file = request.files["audio"]
+    lights_file = request.files["lights"]
+    selected_playlists_raw = request.form.get("playlists", "[]")
+
+    try:
+        target_playlists = json.loads(selected_playlists_raw)
+    except Exception:
+        target_playlists = []
+
+    if not audio_file.filename or not lights_file.filename:
+        return jsonify({"error": "No selected file names"}), 400
+
+    # Secure filenames
+    audio_name = secure_filename(audio_file.filename)
+    lights_name = secure_filename(lights_file.filename)
+
+    audio_dest = MUSIC_DIR / audio_name
+    lights_dest = SEQUENCES_DIR / lights_name
+
+    try:
+        # Save files directly (overwrites existing files on disk)
+        audio_file.save(audio_dest)
+        lights_file.save(lights_dest)
+
+        # Load existing sacn-lightshow/config/playlist.json
+        data = load_playlists_data()
+        if "playlists" not in data or not isinstance(data["playlists"], dict):
+            data["playlists"] = {}
+
+        track_entry = {
+            "title": Path(audio_name).stem.replace("_", " ").title(),
+            "audio": audio_name,
+            "sequence": lights_name,
+            "button_hold_s": 1.5,
+            "post_delay_s": 3.0
+        }
+
+        # Update entries in selected playlists
+        for pl_name in target_playlists:
+            if pl_name not in data["playlists"]:
+                data["playlists"][pl_name] = []
+
+            playlist_items = data["playlists"][pl_name]
+            updated = False
+
+            # Search for an existing entry matching audio or sequence filename to overwrite in-place
+            for idx, item in enumerate(playlist_items):
+                if item.get("audio") == audio_name or item.get("sequence") == lights_name:
+                    playlist_items[idx] = track_entry
+                    updated = True
+                    break
+
+            # Append as new track if no matching entry exists
+            if not updated:
+                playlist_items.append(track_entry)
+
+        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        return jsonify({
+            "status": "success",
+            "audio_saved": audio_name,
+            "sequence_saved": lights_name,
+            "playlists_updated": target_playlists,
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to complete file upload operation: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
