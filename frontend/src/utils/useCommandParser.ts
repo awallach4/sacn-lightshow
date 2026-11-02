@@ -44,6 +44,7 @@ export interface UseCommandParserReturn {
   selectedChannels: Ref<number[]>
   selectedAddresses: Ref<string[]>
   commandText: Ref<string>
+  commandError: Ref<boolean>
   isAddressMode: Ref<boolean>
   isChanCheckMode: Ref<boolean>
   chanCheckLevel: Ref<number>
@@ -81,6 +82,7 @@ const isManual = ref<ManualState>({})
 const selectedChannels = ref<number[]>([])
 const selectedAddresses = ref<string[]>([])
 const commandText = ref<string>('')
+const commandError = ref<boolean>(false)
 const historyStack = ref<HistorySnapshot[]>([])
 const isCommandCompleted = ref<boolean>(false)
 
@@ -451,9 +453,18 @@ export function useCommandParser(): UseCommandParserReturn {
     commandText.value = `ADDRESS ${targetAddr}`
   }
 
+  const triggerSyntaxError = () => {
+    commandError.value = true
+    commandText.value = 'Syntax Error'
+    isCommandCompleted.value = true
+  }
+
   const evaluateCommand = (rawCmd: string): void => {
     const cmd = rawCmd.trim()
-    if (!cmd) return
+    if (!cmd) {
+      triggerSyntaxError()
+      return
+    }
 
     // --- ADDRESS MODE EVALUATION ---
     if (cmd.startsWith('ADDRESS') || isAddressMode.value) {
@@ -473,6 +484,8 @@ export function useCommandParser(): UseCommandParserReturn {
           selectionPart.trim().length > 0
             ? parseAddressSelection(selectionPart)
             : [...selectedAddresses.value]
+
+        if (targets.length === 0) return triggerSyntaxError()
         const targetAddr = targets[0] ?? '1/1'
 
         const parsedIntensity = parseIntensityLevel(levelPart)
@@ -482,6 +495,8 @@ export function useCommandParser(): UseCommandParserReturn {
         isAddressMode.value = true
         isChanCheckMode.value = true
         executeAddressCheckStep(targetAddr)
+        commandText.value = `ADDRESS ${targetAddr} CHAN_CHECK`
+        commandError.value = false
         isCommandCompleted.value = true
         return
       }
@@ -492,7 +507,11 @@ export function useCommandParser(): UseCommandParserReturn {
         const targets =
           selectionPart.trim().length > 0 ? parseAddressSelection(selectionPart) : undefined
         sneakSelectedAddresses(targets)
-        commandText.value = ''
+        commandText.value =
+          selectionPart.trim().length > 0
+            ? `ADDRESS ${selectionPart.trim()} SNEAK`
+            : 'ADDRESS SNEAK'
+        commandError.value = false
         isCommandCompleted.value = true
         return
       }
@@ -506,31 +525,27 @@ export function useCommandParser(): UseCommandParserReturn {
           ? parseAddressSelection(targetStr)
           : [...selectedAddresses.value]
 
+      if (targets.length === 0) return triggerSyntaxError()
+
       const intensity = parseIntensityLevel(levelStr) ?? { type: 'absolute', value: 0 }
+      const nextAddressLevels: AddressState = { ...addressLevels.value }
 
-      if (targets.length > 0) {
-        const nextAddressLevels: AddressState = { ...addressLevels.value }
+      targets.forEach((addr: string, idx: number) => {
+        const levelVal = applyIntensityToValue(
+          nextAddressLevels[addr] ?? 0,
+          intensity,
+          idx,
+          targets.length,
+        )
+        if (levelVal > 0) nextAddressLevels[addr] = levelVal
+        else delete nextAddressLevels[addr]
+      })
 
-        targets.forEach((addr: string, idx: number) => {
-          const levelVal = applyIntensityToValue(
-            nextAddressLevels[addr] ?? 0,
-            intensity,
-            idx,
-            targets.length,
-          )
-          if (levelVal > 0) {
-            nextAddressLevels[addr] = levelVal
-          } else {
-            delete nextAddressLevels[addr]
-          }
-        })
-
-        addressLevels.value = nextAddressLevels
-        selectedAddresses.value = targets
-        selectedChannels.value = []
-        commandText.value = formatAddressSelectionString(targets)
-      }
-
+      addressLevels.value = nextAddressLevels
+      selectedAddresses.value = targets
+      selectedChannels.value = []
+      commandText.value = `${formatAddressSelectionString(targets)} AT ${levelStr.trim() || '0'}`
+      commandError.value = false
       isAddressMode.value = true
       isCommandCompleted.value = true
       return
@@ -553,6 +568,8 @@ export function useCommandParser(): UseCommandParserReturn {
         selectionPart.trim().length > 0
           ? parseChannelSelection(selectionPart)
           : [...selectedChannels.value]
+
+      if (targets.length === 0) return triggerSyntaxError()
       const targetChan = targets[0] ?? 1
 
       const parsedIntensity = parseIntensityLevel(levelPart)
@@ -561,6 +578,8 @@ export function useCommandParser(): UseCommandParserReturn {
 
       isChanCheckMode.value = true
       executeChanCheckStep(targetChan)
+      commandText.value = `${targetChan} CHAN_CHECK`
+      commandError.value = false
       isCommandCompleted.value = true
       return
     }
@@ -590,40 +609,44 @@ export function useCommandParser(): UseCommandParserReturn {
           ? parseChannelSelection(selectionPart)
           : [...selectedChannels.value]
 
-      if (activeTargets.length > 0) {
-        const nextLevels: ChannelState = { ...channelLevels.value }
-        const nextManual: ManualState = { ...isManual.value }
-        const allChannels = getChannelKeys(nextLevels)
+      if (activeTargets.length === 0) return triggerSyntaxError()
 
-        const targetIntensity = parseIntensityLevel(levelPart)
-        const backgroundIntensity = parseIntensityLevel(remDimBackgroundPart)
-        const bgLevel =
-          backgroundIntensity && 'value' in backgroundIntensity ? backgroundIntensity.value : 0
+      const nextLevels: ChannelState = { ...channelLevels.value }
+      const nextManual: ManualState = { ...isManual.value }
+      const allChannels = getChannelKeys(nextLevels)
 
-        allChannels.forEach((chan: number) => {
-          if (activeTargets.includes(chan)) {
-            if (targetIntensity !== null) {
-              const idx = activeTargets.indexOf(chan)
-              nextLevels[chan] = applyIntensityToValue(
-                nextLevels[chan] ?? 0,
-                targetIntensity,
-                idx,
-                activeTargets.length,
-              )
-              nextManual[chan] = true
-            }
-          } else {
-            nextLevels[chan] = bgLevel
+      const targetIntensity = parseIntensityLevel(levelPart)
+      const backgroundIntensity = parseIntensityLevel(remDimBackgroundPart)
+      const bgLevel =
+        backgroundIntensity && 'value' in backgroundIntensity ? backgroundIntensity.value : 0
+
+      allChannels.forEach((chan: number) => {
+        if (activeTargets.includes(chan)) {
+          if (targetIntensity !== null) {
+            const idx = activeTargets.indexOf(chan)
+            nextLevels[chan] = applyIntensityToValue(
+              nextLevels[chan] ?? 0,
+              targetIntensity,
+              idx,
+              activeTargets.length,
+            )
             nextManual[chan] = true
           }
-        })
+        } else {
+          nextLevels[chan] = bgLevel
+          nextManual[chan] = true
+        }
+      })
 
-        channelLevels.value = nextLevels
-        isManual.value = nextManual
-        selectedChannels.value = activeTargets
-        if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
-        commandText.value = formatSelectionString(activeTargets)
-      }
+      channelLevels.value = nextLevels
+      isManual.value = nextManual
+      selectedChannels.value = activeTargets
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+      commandText.value =
+        levelPart.trim().length > 0
+          ? `${formatSelectionString(activeTargets)} AT ${levelPart.trim()} REMDIM`
+          : `${formatSelectionString(activeTargets)} REMDIM`
+      commandError.value = false
       isCommandCompleted.value = true
       return
     }
@@ -654,7 +677,9 @@ export function useCommandParser(): UseCommandParserReturn {
       isManual.value = nextManual
       selectedChannels.value =
         selectionPart.trim().length > 0 || selectedChannels.value.length > 0 ? targets : []
-      commandText.value = formatSelectionString(selectedChannels.value)
+      commandText.value =
+        selectionPart.trim().length > 0 ? `${selectionPart.trim()} SNEAK` : 'SNEAK'
+      commandError.value = false
       isCommandCompleted.value = true
       return
     }
@@ -670,28 +695,29 @@ export function useCommandParser(): UseCommandParserReturn {
           ? parseChannelSelection(selectionPart)
           : [...selectedChannels.value]
 
+      if (targetChannels.length === 0) return triggerSyntaxError()
+
       const intensity = parseIntensityLevel(levelPart) ?? { type: 'absolute', value: 0 }
 
-      if (targetChannels.length > 0) {
-        const nextLevels: ChannelState = { ...channelLevels.value }
-        const nextManual: ManualState = { ...isManual.value }
+      const nextLevels: ChannelState = { ...channelLevels.value }
+      const nextManual: ManualState = { ...isManual.value }
 
-        targetChannels.forEach((chan: number, idx: number) => {
-          nextLevels[chan] = applyIntensityToValue(
-            nextLevels[chan] ?? 0,
-            intensity,
-            idx,
-            targetChannels.length,
-          )
-          nextManual[chan] = true
-        })
+      targetChannels.forEach((chan: number, idx: number) => {
+        nextLevels[chan] = applyIntensityToValue(
+          nextLevels[chan] ?? 0,
+          intensity,
+          idx,
+          targetChannels.length,
+        )
+        nextManual[chan] = true
+      })
 
-        channelLevels.value = nextLevels
-        isManual.value = nextManual
-        selectedChannels.value = targetChannels
-        if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
-        commandText.value = formatSelectionString(targetChannels)
-      }
+      channelLevels.value = nextLevels
+      isManual.value = nextManual
+      selectedChannels.value = targetChannels
+      if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
+      commandText.value = `${formatSelectionString(targetChannels)} AT ${levelPart.trim() || '0'}`
+      commandError.value = false
       isCommandCompleted.value = true
       return
     }
@@ -701,8 +727,11 @@ export function useCommandParser(): UseCommandParserReturn {
       selectedChannels.value = parsedTargets
       if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
       commandText.value = formatSelectionString(parsedTargets)
+      commandError.value = false
+      isCommandCompleted.value = true
+    } else {
+      triggerSyntaxError()
     }
-    isCommandCompleted.value = true
   }
 
   const evaluateSelectionOnly = (cmdStr: string): void => {
@@ -740,15 +769,33 @@ export function useCommandParser(): UseCommandParserReturn {
   }
 
   const handleKeyPress = (key: ConsoleKey): void => {
-    // Exits channel check mode on keys other than NEXT / LAST
+    if (commandError.value) {
+      commandError.value = false
+      commandText.value = ''
+    }
+
     if (isChanCheckMode.value && key !== 'NEXT' && key !== 'LAST') {
       exitChanCheckMode()
+    }
+
+    // Helper to clear command line after completion, preserving existing selection if modifying
+    const prepareCommandLineForNextInput = (isModifier: boolean) => {
+      if (!isCommandCompleted.value) return
+
+      if (isModifier) {
+        const activePrefix = isAddressMode.value
+          ? formatAddressSelectionString(selectedAddresses.value)
+          : formatSelectionString(selectedChannels.value)
+        commandText.value = activePrefix.length > 0 ? activePrefix : ''
+      } else {
+        commandText.value = ''
+      }
+      isCommandCompleted.value = false
     }
 
     const isSelectionModifierKey =
       key === 'AT' ||
       key === ' AT ' ||
-      key === 'ENTER' ||
       key === '+' ||
       key === ' + ' ||
       key === '-' ||
@@ -759,14 +806,17 @@ export function useCommandParser(): UseCommandParserReturn {
       key === 'FULL' ||
       key === 'FULL_FULL' ||
       key === 'OUT' ||
-      /^[0-9]$/.test(key)
+      key === 'SNEAK' ||
+      key === 'REMDIM' ||
+      key === 'CHAN_CHECK'
 
     if (
       isAddressMode.value &&
       isCommandCompleted.value &&
       !isSelectionModifierKey &&
       key !== 'NEXT' &&
-      key !== 'LAST'
+      key !== 'LAST' &&
+      key !== 'ENTER'
     ) {
       sneakSelectedAddresses()
     }
@@ -777,10 +827,13 @@ export function useCommandParser(): UseCommandParserReturn {
         evaluateCommand(commandText.value)
       } else if (selectedAddresses.value.length > 0 && isAddressMode.value) {
         commandText.value = formatAddressSelectionString(selectedAddresses.value)
+        commandError.value = false
+        isCommandCompleted.value = true
       } else if (selectedChannels.value.length > 0) {
         commandText.value = formatSelectionString(selectedChannels.value)
+        commandError.value = false
+        isCommandCompleted.value = true
       }
-      isCommandCompleted.value = true
       return
     }
 
@@ -788,7 +841,6 @@ export function useCommandParser(): UseCommandParserReturn {
       if (isChanCheckMode.value) {
         saveHistorySnapshot()
 
-        // ADDRESS CHECK STEPPING
         if (
           isAddressMode.value ||
           selectedAddresses.value.length > 0 ||
@@ -812,10 +864,12 @@ export function useCommandParser(): UseCommandParserReturn {
           if (nextAddrNum < 1) nextAddrNum = 512
 
           executeAddressCheckStep(`${universe}/${nextAddrNum}`)
+          commandText.value = `ADDRESS ${universe}/${nextAddrNum} CHAN_CHECK`
+          commandError.value = false
+          isCommandCompleted.value = true
           return
         }
 
-        // CHANNEL CHECK STEPPING
         const currentChan = selectedChannels.value[0] ?? 1
         const allChannels = getChannelKeys(channelLevels.value)
         const maxChan = Math.max(...allChannels, 16)
@@ -825,10 +879,12 @@ export function useCommandParser(): UseCommandParserReturn {
         if (nextChan < 1) nextChan = maxChan
 
         executeChanCheckStep(nextChan)
+        commandText.value = `${nextChan} CHAN_CHECK`
+        commandError.value = false
+        isCommandCompleted.value = true
         return
       }
 
-      // STANDARD NEXT / LAST OUTSIDE CHECK MODE
       const currentChans =
         selectedChannels.value.length > 0
           ? selectedChannels.value
@@ -849,11 +905,10 @@ export function useCommandParser(): UseCommandParserReturn {
     }
 
     if (key === 'ADDRESS') {
+      prepareCommandLineForNextInput(false)
       isAddressMode.value = true
-      if (isCommandCompleted.value || !commandText.value.startsWith('ADDRESS')) {
-        commandText.value = 'ADDRESS '
-        isCommandCompleted.value = false
-      }
+      commandText.value = 'ADDRESS '
+      isCommandCompleted.value = false
       return
     }
 
@@ -928,97 +983,51 @@ export function useCommandParser(): UseCommandParserReturn {
       return
     }
 
+    // Process completed command state before adding new key input
     if (isCommandCompleted.value) {
-      if (/^[0-9]/.test(key)) {
-        if (!isAddressMode.value) {
-          if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
-          commandText.value = key
-          isCommandCompleted.value = false
-          evaluateSelectionOnly(key)
-          return
-        }
-      }
-      isCommandCompleted.value = false
+      prepareCommandLineForNextInput(isSelectionModifierKey)
     }
 
     const line = commandText.value
 
     if (key === 'CHAN_CHECK') {
       if (isAddressMode.value || selectedAddresses.value.length > 0 || line.startsWith('ADDRESS')) {
-        if (isCommandCompleted.value) {
-          commandText.value = formatAddressSelectionString(selectedAddresses.value) + ' CHAN_CHECK '
-          isCommandCompleted.value = false
-        } else {
-          commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'ADDRESS CHAN_CHECK '
-        }
+        commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'ADDRESS CHAN_CHECK '
         return
       }
 
       if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
       isAddressMode.value = false
       selectedAddresses.value = []
-      if (isCommandCompleted.value) {
-        commandText.value = formatSelectionString(selectedChannels.value) + ' CHAN_CHECK '
-        isCommandCompleted.value = false
-      } else {
-        commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'CHAN_CHECK '
-      }
+      commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'CHAN_CHECK '
       return
     }
 
     if (key === ' - ' || key === '-') {
-      const prefix = isAddressMode.value
-        ? formatAddressSelectionString(selectedAddresses.value)
-        : formatSelectionString(selectedChannels.value)
-      if (isCommandCompleted.value) {
-        commandText.value = prefix + ' - '
-        isCommandCompleted.value = false
-      } else if (line.endsWith('AT') || line.endsWith('AT ')) {
+      if (line.endsWith('AT') || line.endsWith('AT ')) {
         commandText.value = line.trimEnd() + ' -'
       } else {
-        commandText.value += ' - '
+        commandText.value += line.length > 0 && !line.endsWith(' ') ? ' - ' : '- '
       }
       return
     }
 
     if (key === ' + ' || key === '+') {
-      const prefix = isAddressMode.value
-        ? formatAddressSelectionString(selectedAddresses.value)
-        : formatSelectionString(selectedChannels.value)
-      if (isCommandCompleted.value) {
-        commandText.value = prefix + ' + '
-        isCommandCompleted.value = false
-      } else if (line.endsWith('AT') || line.endsWith('AT ')) {
+      if (line.endsWith('AT') || line.endsWith('AT ')) {
         commandText.value = line.trimEnd() + ' +'
       } else {
-        commandText.value += ' + '
+        commandText.value += line.length > 0 && !line.endsWith(' ') ? ' + ' : '+ '
       }
       return
     }
 
     if (key === ' THRU ' || key === 'THRU') {
-      const prefix = isAddressMode.value
-        ? formatAddressSelectionString(selectedAddresses.value)
-        : formatSelectionString(selectedChannels.value)
-      if (isCommandCompleted.value) {
-        commandText.value = prefix + ' THRU '
-        isCommandCompleted.value = false
-      } else {
-        commandText.value += ' THRU '
-      }
+      commandText.value += line.length > 0 && !line.endsWith(' ') ? ' THRU ' : 'THRU '
       return
     }
 
     if (key === '/') {
-      const prefix = isAddressMode.value
-        ? formatAddressSelectionString(selectedAddresses.value)
-        : formatSelectionString(selectedChannels.value)
-      if (isCommandCompleted.value) {
-        commandText.value = prefix + ' / '
-        isCommandCompleted.value = false
-      } else {
-        commandText.value += '/'
-      }
+      commandText.value += '/'
       return
     }
 
@@ -1040,13 +1049,7 @@ export function useCommandParser(): UseCommandParserReturn {
         }
         return
       } else {
-        if (isCommandCompleted.value) {
-          const prefix = isAddressMode.value
-            ? formatAddressSelectionString(selectedAddresses.value)
-            : formatSelectionString(selectedChannels.value)
-          commandText.value = prefix + ' AT FULL'
-          isCommandCompleted.value = false
-        } else if (line.endsWith('THRU') || line.endsWith('THRU ')) {
+        if (line.endsWith('THRU') || line.endsWith('THRU ')) {
           commandText.value = line.trimEnd() + ' FULL'
         } else if (line.endsWith('AT') || line.endsWith('AT ')) {
           commandText.value = line.trimEnd() + ' FULL'
@@ -1058,14 +1061,9 @@ export function useCommandParser(): UseCommandParserReturn {
     }
 
     if (key === ' AT ' || key === 'AT') {
-      if (isCommandCompleted.value) {
-        const prefix = isAddressMode.value
-          ? formatAddressSelectionString(selectedAddresses.value)
-          : formatSelectionString(selectedChannels.value)
-        commandText.value = prefix + ' AT '
-        isCommandCompleted.value = false
-      } else if (!line.includes('AT')) {
-        commandText.value = line.length > 0 ? line + ' AT ' : 'AT '
+      if (!line.includes('AT')) {
+        commandText.value =
+          line.length > 0 ? (line.endsWith(' ') ? `${line}AT ` : `${line} AT `) : 'AT '
       }
       return
     }
@@ -1085,28 +1083,14 @@ export function useCommandParser(): UseCommandParserReturn {
     }
 
     if (key === 'SNEAK') {
-      if (isCommandCompleted.value) {
-        const prefix = isAddressMode.value
-          ? formatAddressSelectionString(selectedAddresses.value)
-          : formatSelectionString(selectedChannels.value)
-        commandText.value = prefix + ' SNEAK'
-        isCommandCompleted.value = false
-      } else {
-        commandText.value = line.length > 0 ? line + ' SNEAK' : 'SNEAK'
-      }
+      commandText.value =
+        line.length > 0 ? (line.endsWith(' ') ? `${line}SNEAK` : `${line} SNEAK`) : 'SNEAK'
       return
     }
 
     if (key === 'REMDIM') {
-      if (isCommandCompleted.value) {
-        const prefix = isAddressMode.value
-          ? formatAddressSelectionString(selectedAddresses.value)
-          : formatSelectionString(selectedChannels.value)
-        commandText.value = prefix + ' REMDIM '
-        isCommandCompleted.value = false
-      } else {
-        commandText.value = line.length > 0 ? line + ' REMDIM ' : 'REMDIM '
-      }
+      commandText.value =
+        line.length > 0 ? (line.endsWith(' ') ? `${line}REMDIM ` : `${line} REMDIM `) : 'REMDIM '
       return
     }
 
@@ -1147,6 +1131,7 @@ export function useCommandParser(): UseCommandParserReturn {
     selectedChannels,
     selectedAddresses,
     commandText,
+    commandError,
     isAddressMode,
     isChanCheckMode,
     chanCheckLevel,

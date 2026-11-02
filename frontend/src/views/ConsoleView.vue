@@ -5,8 +5,12 @@
       <main class="console-body mt-12">
         <ChannelGrid />
         <section class="top-bar">
-          <div class="status-indicator">LIVE></div>
-          <div class="command-preview">{{ commandText }}</div>
+          <div class="status-indicator">LIVE:</div>
+          <div class="command-preview" :class="{ 'syntax-error': commandError }">
+            <span>{{ commandText }}</span>
+            <span v-if="isCommandCompleted && !commandError"> ◆</span>
+            <span v-else class="cmd-cursor"> _</span>
+          </div>
         </section>
         <ConsoleKeypad />
       </main>
@@ -19,7 +23,7 @@ import { onMounted, onUnmounted } from 'vue'
 import { useCommandParser } from '@/utils/useCommandParser'
 import { useSeoMeta } from '@unhead/vue'
 
-const { commandText, handleKeyPress } = useCommandParser()
+const { commandText, handleKeyPress, isCommandCompleted, commandError } = useCommandParser()
 
 // Physical Keyboard Shortcuts for Bench Testing
 const onKeyDown = (e: KeyboardEvent) => {
@@ -111,21 +115,7 @@ useSeoMeta({
 })
 </script>
 
-<style>
-html,
-body {
-  background: #09090b;
-  margin: 0;
-  padding: 0;
-  min-height: 100vh;
-  font-family:
-    system-ui,
-    -apple-system,
-    sans-serif;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
+<style scoped>
 .console-root {
   display: flex;
   flex-direction: column;
@@ -139,7 +129,7 @@ body {
 .top-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   background: #18181b;
   border: 1px solid #27272a;
   border-radius: 6px;
@@ -156,7 +146,7 @@ body {
 }
 
 .command-preview {
-  color: #f4f4f5;
+  color: #eab308;
   font-size: 1rem;
   font-weight: 700;
   white-space: nowrap;
@@ -181,6 +171,20 @@ body {
   display: flex;
   justify-content: center;
   width: 100%;
+}
+
+.command-preview.syntax-error {
+  color: #ff0000 !important;
+}
+
+@keyframes cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.cmd-cursor {
+  animation: cursor-blink 1s steps(2, start) infinite;
 }
 
 /* Mobile Viewport Adaptation (< 640px) */
