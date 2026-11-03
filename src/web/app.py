@@ -7,6 +7,7 @@ import psutil
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 # Resolve base directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -159,17 +160,21 @@ def host_control(command):
         return jsonify({"error": f"Failed to execute host action: {str(e)}"}), 500
 
 ###############################################################################
-#                          Playlist Editor Backend                            #
+#                          Config & Playlist Backend                          #
 ###############################################################################
 
-from werkzeug.utils import secure_filename
-
 # Resolve base directories for sacn-lightshow layout
-SHOWFILES_DIR = PROJECT_ROOT  / "showfiles"
+SHOWFILES_DIR = PROJECT_ROOT / "showfiles"
 MUSIC_DIR = SHOWFILES_DIR / "music"
 SEQUENCES_DIR = SHOWFILES_DIR / "sequences"
 CONFIG_DIR = PROJECT_ROOT / "config"
-PLAYLIST_JSON_PATH = CONFIG_DIR / "playlist.json"
+
+# Target JSON configuration files
+CONFIG_FILES = {
+    "main_config": CONFIG_DIR / "main_config.json",
+    "patch": CONFIG_DIR / "patch.json",
+    "playlist": CONFIG_DIR / "playlist.json",
+}
 
 # Ensure target directories exist on server start
 MUSIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -178,9 +183,10 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Helper to load playlist structure safely
 def load_playlists_data() -> dict:
-    if PLAYLIST_JSON_PATH.is_file():
+    playlist_path = CONFIG_FILES["playlist"]
+    if playlist_path.is_file():
         try:
-            with open(PLAYLIST_JSON_PATH, "r", encoding="utf-8") as f:
+            with open(playlist_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -188,28 +194,40 @@ def load_playlists_data() -> dict:
     return {"playlists": {}}
 
 # -------------------------------------------------------------------
-# GET / POST: Raw playlist.json management
+# GET / POST: Unified Dynamic JSON Config Management
+# Supports: /api/config/main_config, /api/config/patch, /api/config/playlist
 # -------------------------------------------------------------------
-@app.route("/api/playlist/config", methods=["GET"])
-def get_playlist_config():
-    """Returns the contents of playlist.json for the frontend editor."""
-    if not PLAYLIST_JSON_PATH.is_file():
-        default_config = {"playlists": {"playlist": [], "playlist 2": []}}
-        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(default_config, f, indent=2)
-        return jsonify({"content": json.dumps(default_config, indent=2)}), 200
+@app.route("/api/config/<config_type>", methods=["GET"])
+def get_json_config(config_type):
+    """Returns the raw content of the requested JSON configuration file."""
+    if config_type not in CONFIG_FILES:
+        return jsonify({"error": f"Invalid configuration type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
+
+    target_file = CONFIG_FILES[config_type]
+
+    if not target_file.is_file():
+        default_content = {"playlists": {"playlist": [], "playlist 2": []}} if config_type == "playlist" else {}
+        try:
+            with open(target_file, "w", encoding="utf-8") as f:
+                json.dump(default_content, f, indent=2)
+            return jsonify({"content": json.dumps(default_content, indent=2)}), 200
+        except Exception as e:
+            return jsonify({"error": f"Failed to initialize default {config_type}.json: {str(e)}"}), 500
 
     try:
-        with open(PLAYLIST_JSON_PATH, "r", encoding="utf-8") as f:
+        with open(target_file, "r", encoding="utf-8") as f:
             raw_text = f.read()
         return jsonify({"content": raw_text}), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to read playlist config: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to read {config_type}.json: {str(e)}"}), 500
 
 
-@app.route("/api/playlist/config", methods=["POST"])
-def save_playlist_config():
-    """Saves raw text content back to playlist.json after verifying JSON syntax."""
+@app.route("/api/config/<config_type>", methods=["POST"])
+def save_json_config(config_type):
+    """Saves raw text content back to the specified JSON configuration file after syntax validation."""
+    if config_type not in CONFIG_FILES:
+        return jsonify({"error": f"Invalid configuration type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
+
     payload = request.get_json() or {}
     raw_content = payload.get("content", "")
 
@@ -219,13 +237,13 @@ def save_playlist_config():
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON syntax: {str(e)}"}), 400
 
+    target_file = CONFIG_FILES[config_type]
     try:
-        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
+        with open(target_file, "w", encoding="utf-8") as f:
             json.dump(parsed_data, f, indent=2)
-        return jsonify({"status": "success", "message": "playlist.json saved successfully"}), 200
+        return jsonify({"status": "success", "message": f"{config_type}.json saved successfully"}), 200
     except Exception as e:
-        return jsonify({"error": f"Failed to write playlist config: {str(e)}"}), 500
-
+        return jsonify({"error": f"Failed to write {config_type}.json: {str(e)}"}), 500
 
 # -------------------------------------------------------------------
 # POST: File Upload and Auto-Playlist Assignment
@@ -292,7 +310,7 @@ def upload_show_files():
             if not updated:
                 playlist_items.append(track_entry)
 
-        with open(PLAYLIST_JSON_PATH, "w", encoding="utf-8") as f:
+        with open(CONFIG_FILES["playlist"], "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
         return jsonify({
