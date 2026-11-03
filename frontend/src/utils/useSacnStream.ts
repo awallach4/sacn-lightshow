@@ -28,7 +28,7 @@ export function useSacnStream(getPatchConfig: () => PatchConfig) {
     const dmxMap = resolvePatchOutput(patch, channelLevels.value, addressLevels.value)
 
     const payload = {
-      priority: 150, // High priority override
+      priority: 50,
       source: 'Command Console UI',
       frame: dmxMap, // e.g. { "1/1": 255, "1/2": 128, "2/5": 255 }
     }

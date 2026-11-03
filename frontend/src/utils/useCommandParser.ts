@@ -134,7 +134,7 @@ export function useCommandParser(): UseCommandParserReturn {
     }
   }
 
-  // Stream current level state resolved through patch schema to Flask backend (Priority 150)
+  // Stream current level state resolved through patch schema to Flask backend (Priority 50)
   const transmitSacnFrame = async (): Promise<void> => {
     if (!patchConfig.value) return
 
@@ -145,7 +145,7 @@ export function useCommandParser(): UseCommandParserReturn {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          priority: 150,
+          priority: 50,
           source: 'Console UI',
           frame: dmxFrame,
         }),

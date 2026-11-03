@@ -339,9 +339,9 @@ active_universes = set()
 
 @app.route("/api/sacn/stream", methods=["POST"])
 def sacn_stream_handler():
-    """Receives DMX frame from frontend parser and broadcasts sACN at Priority 150."""
+    """Receives DMX frame from frontend parser and broadcasts sACN at Priority 50."""
     payload = request.get_json() or {}
-    priority = payload.get("priority", 150)
+    priority = payload.get("priority", 50)
     frame = payload.get("frame", {})  # Key format: "universe/address" -> dmxValue (0-255)
 
     # Group frame levels by universe
@@ -367,7 +367,7 @@ def sacn_stream_handler():
             sacn_sender[universe].multicast = True
             active_universes.add(universe)
         
-        # Override transmission priority to 150
+        # Transmission priority to 50
         sacn_sender[universe].priority = priority
         sacn_sender[universe].dmx_data = dmx_data
 
