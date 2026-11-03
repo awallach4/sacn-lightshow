@@ -17,10 +17,6 @@ defineProps<{
         link: 'px-2 py-1',
         linkLeadingIcon: 'hidden',
       }"
-    >
-      <template #list-trailing>
-        <ColorModeButton />
-      </template>
-    </UNavigationMenu>
+    />
   </div>
 </template>

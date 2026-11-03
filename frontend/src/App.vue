@@ -1,20 +1,14 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import { navLinks } from '@/utils/links'
-import { useColorMode } from '@vueuse/core'
-import { computed } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import { useHead, useSeoMeta } from '@unhead/vue'
-
-const colorMode = useColorMode()
-
-const color = computed(() => (colorMode.value === 'dark' ? '#020618' : 'white'))
 
 useHead({
   meta: [
     { charset: 'utf-8' },
     { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-    { key: 'theme-color', name: 'theme-color', content: color },
+    { key: 'theme-color', name: 'theme-color', content: '#020618' },
   ],
   link: [{ rel: 'icon', href: '/favicon.ico' }],
   htmlAttrs: {

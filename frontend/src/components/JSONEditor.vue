@@ -158,12 +158,12 @@ watch(open, (isOpen) => {
   >
     <template #body>
       <div
-        class="h-[80vh] w-full flex bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden font-mono text-sm"
+        class="h-[80vh] w-full flex bg-neutral-950 border border-neutral-800 rounded-lg overflow-hidden font-mono text-sm"
       >
         <!-- Line Number Gutter -->
         <div
           ref="lineNumbersRef"
-          class="w-12 shrink-0 py-4 select-none text-right pr-3 bg-neutral-100 dark:bg-neutral-900 text-neutral-400 dark:text-neutral-600 border-r border-neutral-200 dark:border-neutral-800 overflow-hidden leading-relaxed text-xs sm:text-sm"
+          class="w-12 shrink-0 py-4 select-none text-right pr-3 bg-neutral-900 text-neutral-600 border-r border-neutral-800 overflow-hidden leading-relaxed text-xs sm:text-sm"
         >
           <div v-for="n in lineCount" :key="n">{{ n }}</div>
         </div>
@@ -176,7 +176,7 @@ watch(open, (isOpen) => {
             class="w-full h-full"
             :ui="{
               root: 'w-full h-full flex flex-col',
-              base: 'h-full resize-none font-mono text-xs sm:text-sm p-4 leading-relaxed bg-transparent text-neutral-900 dark:text-neutral-100 border-0 focus:ring-0',
+              base: 'h-full resize-none font-mono text-xs sm:text-sm p-4 leading-relaxed bg-transparent text-neutral-100 border-0 focus:ring-0',
             }"
             placeholder="Edit raw JSON configuration..."
             autofocus

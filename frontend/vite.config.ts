@@ -12,6 +12,7 @@ export default defineConfig({
     tailwindcss(),
     vue(),
     ui({
+      colorMode: false,
       ui: {
         colors: {
           primary: 'green',
