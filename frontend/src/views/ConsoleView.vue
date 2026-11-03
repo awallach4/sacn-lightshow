@@ -23,7 +23,8 @@ import { onMounted, onUnmounted } from 'vue'
 import { useCommandParser } from '@/utils/useCommandParser'
 import { useSeoMeta } from '@unhead/vue'
 
-const { commandText, handleKeyPress, isCommandCompleted, commandError } = useCommandParser()
+const { commandText, handleKeyPress, isCommandCompleted, commandError, loadPatchConfig } =
+  useCommandParser()
 
 // Physical Keyboard Shortcuts for Bench Testing
 const onKeyDown = (e: KeyboardEvent) => {
@@ -106,7 +107,10 @@ const onKeyDown = (e: KeyboardEvent) => {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeyDown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeyDown)
+  loadPatchConfig()
+})
 onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
 
 useSeoMeta({

@@ -1,4 +1,6 @@
-import { ref, readonly, type DeepReadonly, type Ref } from 'vue'
+import { ref, readonly, watch, type DeepReadonly, type Ref } from 'vue'
+import { resolvePatchOutput, type PatchConfig } from '../utils/patchResolver'
+import { useToast } from '@nuxt/ui/runtime/composables/useToast.js'
 
 // --- STRICT TYPES ---
 
@@ -50,6 +52,9 @@ export interface UseCommandParserReturn {
   chanCheckLevel: Ref<number>
   historyStack: DeepReadonly<Ref<HistorySnapshot[]>>
   isCommandCompleted: Ref<boolean>
+  patchConfig: Ref<PatchConfig | null>
+  loadPatchConfig: () => Promise<void>
+  transmitSacnFrame: () => Promise<void>
   handleKeyPress: (key: ConsoleKey) => void
   evaluateCommand: (rawCmd: string) => void
   saveHistorySnapshot: () => void
@@ -57,24 +62,7 @@ export interface UseCommandParserReturn {
 
 // --- GLOBAL REACTIVE STATE ---
 
-const INITIAL_CHANNELS: ChannelState = {
-  1: 0,
-  2: 0,
-  3: 0,
-  4: 0,
-  5: 0,
-  6: 0,
-  7: 0,
-  8: 0,
-  9: 0,
-  10: 0,
-  11: 0,
-  12: 0,
-  13: 0,
-  14: 0,
-  15: 0,
-  16: 0,
-}
+const INITIAL_CHANNELS: ChannelState = {}
 
 const channelLevels = ref<ChannelState>({ ...INITIAL_CHANNELS })
 const addressLevels = ref<AddressState>({})
@@ -91,9 +79,91 @@ const isChanCheckMode = ref<boolean>(false)
 const chanCheckLevel = ref<number>(100)
 let lastFullClickTime = 0
 
+const toast = useToast()
+
+// Active patch schema cache
+const patchConfig = ref<PatchConfig | null>(null)
+
 // --- COMPOSABLE ---
 
 export function useCommandParser(): UseCommandParserReturn {
+  // Dynamic patch configuration state
+  const patchConfig = ref<PatchConfig | null>(null)
+
+  // Initialize reactive channel levels dynamically based on patch contents
+  const syncChannelLevelsFromPatch = (patch: PatchConfig) => {
+    const nextLevels: ChannelState = {}
+    const channelsSet = new Set<number>()
+
+    if (patch.patch) {
+      // Iterate over every universe key ("1", "2", etc.)
+      Object.values(patch.patch).forEach((universeData) => {
+        if (!universeData.devices) return
+
+        // Collect device IDs (channels) mapped within this universe
+        Object.keys(universeData.devices).forEach((deviceIdStr) => {
+          const channelNum = parseInt(deviceIdStr, 10)
+          if (!isNaN(channelNum)) {
+            channelsSet.add(channelNum)
+          }
+        })
+      })
+    }
+
+    // Preserve existing active levels for patched channels or default to 0
+    const sortedChannels = Array.from(channelsSet).sort((a, b) => a - b)
+    sortedChannels.forEach((chan) => {
+      nextLevels[chan] = channelLevels.value[chan] ?? 0
+    })
+
+    channelLevels.value = nextLevels
+  }
+
+  // Fetch active patch configuration from backend
+  const loadPatchConfig = async (): Promise<void> => {
+    try {
+      const res = await fetch('/api/config/patch')
+      if (!res.ok) return
+      const data = await res.json()
+      const parsed: PatchConfig = typeof data.content === 'string' ? JSON.parse(data.content) : data
+
+      patchConfig.value = parsed
+      syncChannelLevelsFromPatch(parsed)
+    } catch {
+      toast.add({ title: 'Error', description: 'Failed to fetch patch.json.', color: 'error' })
+    }
+  }
+
+  // Stream current level state resolved through patch schema to Flask backend (Priority 150)
+  const transmitSacnFrame = async (): Promise<void> => {
+    if (!patchConfig.value) return
+
+    const dmxFrame = resolvePatchOutput(patchConfig.value, channelLevels.value, addressLevels.value)
+
+    try {
+      await fetch('/api/sacn/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          priority: 150,
+          source: 'Console UI',
+          frame: dmxFrame,
+        }),
+      })
+    } catch {
+      // Quiet handling for dev server disconnects
+    }
+  }
+
+  // Automatically transmit sACN output frame whenever levels update
+  watch(
+    [channelLevels, addressLevels],
+    () => {
+      transmitSacnFrame()
+    },
+    { deep: true },
+  )
+
   const getChannelKeys = (map: ChannelState): number[] => {
     return Object.keys(map)
       .map((k: string) => parseInt(k, 10))
@@ -161,10 +231,13 @@ export function useCommandParser(): UseCommandParserReturn {
       .split(/\s+/)
       .filter((t: string): boolean => t.length > 0)
     const selectionList: number[] = []
+    const validPatchedChannels = getChannelKeys(channelLevels.value)
     let currentMode: '+' | '-' = '+'
     let i = 0
 
     const addChannel = (ch: number) => {
+      // Strictly require the channel to exist in patch.json
+      if (!validPatchedChannels.includes(ch)) return
       const existingIdx = selectionList.indexOf(ch)
       if (existingIdx !== -1) selectionList.splice(existingIdx, 1)
       selectionList.push(ch)
@@ -778,7 +851,6 @@ export function useCommandParser(): UseCommandParserReturn {
       exitChanCheckMode()
     }
 
-    // Helper to clear command line after completion, preserving existing selection if modifying
     const prepareCommandLineForNextInput = (isModifier: boolean) => {
       if (!isCommandCompleted.value) return
 
@@ -838,6 +910,9 @@ export function useCommandParser(): UseCommandParserReturn {
     }
 
     if (key === 'NEXT' || key === 'LAST') {
+      const patchedChannels = getChannelKeys(channelLevels.value).sort((a, b) => a - b)
+      const fallbackChan = patchedChannels[0] ?? 1
+
       if (isChanCheckMode.value) {
         saveHistorySnapshot()
 
@@ -870,14 +945,20 @@ export function useCommandParser(): UseCommandParserReturn {
           return
         }
 
-        const currentChan = selectedChannels.value[0] ?? 1
-        const allChannels = getChannelKeys(channelLevels.value)
-        const maxChan = Math.max(...allChannels, 16)
+        if (patchedChannels.length === 0) return
 
-        let nextChan = key === 'NEXT' ? currentChan + 1 : currentChan - 1
-        if (nextChan > maxChan) nextChan = 1
-        if (nextChan < 1) nextChan = maxChan
+        const currentChan = selectedChannels.value[0] ?? fallbackChan
+        const currentIndex = patchedChannels.indexOf(currentChan)
+        const nextIndex =
+          currentIndex === -1
+            ? key === 'NEXT'
+              ? 0
+              : patchedChannels.length - 1
+            : key === 'NEXT'
+              ? (currentIndex + 1) % patchedChannels.length
+              : (currentIndex - 1 + patchedChannels.length) % patchedChannels.length
 
+        const nextChan = patchedChannels[nextIndex] ?? fallbackChan
         executeChanCheckStep(nextChan)
         commandText.value = `${nextChan} CHAN_CHECK`
         commandError.value = false
@@ -885,16 +966,29 @@ export function useCommandParser(): UseCommandParserReturn {
         return
       }
 
+      // Standard Channel Selection NEXT / LAST Cycling
+      if (patchedChannels.length === 0) return
+
       const currentChans =
         selectedChannels.value.length > 0
           ? selectedChannels.value
           : commandText.value.trim().length > 0
             ? parseChannelSelection(commandText.value)
-            : [1]
+            : []
 
-      const refChan = key === 'NEXT' ? Math.max(...currentChans) : Math.min(...currentChans)
+      const refChan =
+        currentChans.length > 0
+          ? key === 'NEXT'
+            ? Math.max(...currentChans)
+            : Math.min(...currentChans)
+          : fallbackChan
 
-      const targetChan = key === 'NEXT' ? refChan + 1 : Math.max(1, refChan - 1)
+      const targetChan: number =
+        key === 'NEXT'
+          ? (patchedChannels.find((c) => c > refChan) ?? fallbackChan)
+          : ([...patchedChannels].reverse().find((c) => c < refChan) ??
+            patchedChannels[patchedChannels.length - 1] ??
+            fallbackChan)
 
       if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
       selectedChannels.value = [targetChan]
@@ -983,7 +1077,6 @@ export function useCommandParser(): UseCommandParserReturn {
       return
     }
 
-    // Process completed command state before adding new key input
     if (isCommandCompleted.value) {
       prepareCommandLineForNextInput(isSelectionModifierKey)
     }
@@ -1137,6 +1230,9 @@ export function useCommandParser(): UseCommandParserReturn {
     chanCheckLevel,
     historyStack: readonly(historyStack),
     isCommandCompleted,
+    patchConfig,
+    loadPatchConfig,
+    transmitSacnFrame,
     handleKeyPress,
     evaluateCommand,
     saveHistorySnapshot,

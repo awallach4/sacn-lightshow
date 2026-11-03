@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import sacn
 
 # Resolve base directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -323,6 +324,52 @@ def upload_show_files():
     except Exception as e:
         return jsonify({"error": f"Failed to complete file upload operation: {str(e)}"}), 500
 
+###############################################################################
+#                               Console Backend                               #
+###############################################################################
+
+# Initialize sACN Sender Node
+sacn_sender = sacn.sACNsender(fps=30)
+sacn_sender.start()
+
+# Active universe registration tracking
+active_universes = set()
+
+@app.route("/api/sacn/stream", methods=["POST"])
+def sacn_stream_handler():
+    """Receives DMX frame from frontend parser and broadcasts sACN at Priority 150."""
+    payload = request.get_json() or {}
+    priority = payload.get("priority", 150)
+    frame = payload.get("frame", {})  # Key format: "universe/address" -> dmxValue (0-255)
+
+    # Group frame levels by universe
+    universe_buffers = {}
+    for dmx_key, val in frame.items():
+        try:
+            u_str, a_str = dmx_key.split("/")
+            universe = int(u_str)
+            address = int(a_str)
+            
+            if universe not in universe_buffers:
+                universe_buffers[universe] = [0] * 512
+            
+            if 1 <= address <= 512:
+                universe_buffers[universe][address - 1] = max(0, min(255, int(val)))
+        except Exception:
+            continue
+
+    # Transmit frames for each active universe
+    for universe, dmx_data in universe_buffers.items():
+        if universe not in active_universes:
+            sacn_sender.activate_output(universe)
+            sacn_sender[universe].multicast = True
+            active_universes.add(universe)
+        
+        # Override transmission priority to 150
+        sacn_sender[universe].priority = priority
+        sacn_sender[universe].dmx_data = dmx_data
+
+    return jsonify({"status": "transmitting", "priority": priority, "universes": list(universe_buffers.keys())}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
