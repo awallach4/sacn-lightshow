@@ -79,10 +79,10 @@ def load_system_configs(main_config_path):
     target_playlist_name = sys_settings.get("playlist_name", "playlist") or paths.get("playlist_name", "playlist")
 
     if isinstance(playlist_file_data, dict):
-        if target_playlist_name not in playlist_file_data:
+        if target_playlist_name not in playlist_file_data['playlists'].keys():
             print(f"[ERROR] Playlist key '{target_playlist_name}' not found in {playlist_path}", file=sys.stderr)
             sys.exit(1)
-        playlist_data = playlist_file_data[target_playlist_name]
+        playlist_data = playlist_file_data['playlists'][target_playlist_name]
     elif isinstance(playlist_file_data, list):
         playlist_data = playlist_file_data
     else:
@@ -343,7 +343,7 @@ def run_track(track_idx, playlist, telemetry=None):
         button_hold = current_track.get("button_hold_s", 0)
 
         audio_cmd = [sys.executable, audio_script, audio_path]
-        sacn_cmd = [sys.executable, sacn_script, sequence_path, "--universe", str(universe), "--button-hold", str(button_hold)]
+        sacn_cmd = [sys.executable, sacn_script, sequence_path, "--universe", str(universe), "--button-hold", str(button_hold), '--multicast']
 
         audio_proc = subprocess.Popen(audio_cmd, stdin=subprocess.PIPE, text=True)
         sacn_proc = subprocess.Popen(sacn_cmd, stdin=subprocess.PIPE, text=True)
