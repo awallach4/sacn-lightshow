@@ -9,6 +9,15 @@ to orchestrate audio streaming and sACN lighting sequences.
 
 Usage:
     python3 src/show_control.py [-c config/main_config.json]
+
+Optional main_config.json keys (all have defaults):
+    system.sync.lead_time_s       runway between "workers ready" and T0 (default 1.0)
+    system.sync.ready_timeout_s   max seconds to wait for workers to finish setup (default 60)
+    system.sync.end_grace_s       hang guard after one worker finishes (default 15; the
+                                  track's button_hold_s is added automatically)
+    system.sync.light_speed       light playback speed multiplier, e.g. 0.98 (default 1.0)
+    system.broadcast.audio_offset_s    shift FM audio vs lights; + = later (default 0.0)
+    system.broadcast.speaker_offset_s  shift monitor speakers vs lights (default 0.0)
 """
 
 import sys
@@ -99,7 +108,7 @@ def load_system_configs(main_config_path):
             if not p.is_absolute():
                 resolved_asset = (PROJECT_ROOT / raw_asset_path.lstrip("/\\")).resolve()
             else:
-                resolved_asset = p.resolve
+                resolved_asset = p.resolve()
 
             item[key] = str(resolved_asset)
 
@@ -290,6 +299,54 @@ def init_persistent_fm_carrier(telemetry):
 # PLAYLIST EXECUTION LOOP
 # ==============================================================================
 
+READY_TOKEN = "@@READY@@"
+
+
+def check_track_lengths(audio_path, sequence_path):
+    """Pre-flight: warn if the FSEQ and the audio file are different lengths."""
+    try:
+        with open(sequence_path, "rb") as f:
+            hdr = f.read(32)
+        import struct
+        frames = struct.unpack_from("<I", hdr, 14)[0]
+        seq_s = frames * hdr[18] / 1000.0
+        out = subprocess.run(["soxi", "-D", audio_path], capture_output=True, text=True, timeout=10)
+        audio_s = float(out.stdout.strip())
+    except Exception:
+        return  # soxi missing / unreadable header: skip silently
+    print(f"[CHECK] audio {audio_s:.2f}s vs sequence {seq_s:.2f}s (difference {seq_s - audio_s:+.2f}s)")
+    if abs(seq_s - audio_s) > 0.5:
+        print("[CHECK] WARNING: sequence and audio lengths differ by more than 0.5s. If the sequence is "
+              "SHORTER, the lights end early by design of the file (re-render/re-export in xLights).")
+
+
+def _pump_output(proc, name, ready_event):
+    """Forward a worker's stdout to our console and watch for its READY token.
+
+    Draining the pipe also guarantees a chatty worker can never block on a full pipe.
+    """
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line == READY_TOKEN:
+            ready_event.set()
+        elif line:
+            print(f"[{name}] {line}", flush=True)
+
+
+def _wait_until_ready(workers, timeout_s):
+    """workers: list of (name, proc, ready_event). Raises if one dies or times out."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if all(ev.is_set() for _, _, ev in workers):
+            return
+        for name, proc, ev in workers:
+            if not ev.is_set() and proc.poll() is not None:
+                raise RuntimeError(f"{name} worker exited (code {proc.returncode}) before becoming ready")
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"Timed out after {timeout_s:.0f}s waiting for workers to become ready")
+        time.sleep(0.02)
+
+
 def run_track(track_idx, playlist, telemetry=None):
     """Executes a track by index from the master playlist with T0 clock sync."""
     global active_processes, sys_config
@@ -333,8 +390,13 @@ def run_track(track_idx, playlist, telemetry=None):
 
     processes = []
     try:
-        lead_time_s = 1.50
-        t0 = time.monotonic() + lead_time_s
+        sync_cfg = sys_config.get("sync", {})
+        broadcast_cfg = sys_config.get("broadcast", {})
+        lead_time_s = sync_cfg.get("lead_time_s", 1.0)          # runway between READY and T0
+        ready_timeout_s = sync_cfg.get("ready_timeout_s", 60.0)  # max time for decode/setup
+        end_grace_s = sync_cfg.get("end_grace_s", 15.0)          # hang guard once one worker finishes
+        fm_offset_s = broadcast_cfg.get("audio_offset_s", 0.0)   # calibrate FM latency (+ = later)
+        speaker_offset_s = broadcast_cfg.get("speaker_offset_s", 0.0)
 
         audio_script = os.path.join(SRC_DIR, "audio_playback.py")
         sacn_script = os.path.join(SRC_DIR, "sacn/sacn_transmitter.py")
@@ -342,33 +404,66 @@ def run_track(track_idx, playlist, telemetry=None):
 
         button_hold = current_track.get("button_hold_s", 0)
 
-        audio_cmd = [sys.executable, audio_script, audio_path]
-        sacn_cmd = [sys.executable, sacn_script, sequence_path, "--universe", str(universe), "--button-hold", str(button_hold), '--multicast']
+        light_speed = sync_cfg.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
+        check_track_lengths(audio_path, sequence_path)
 
-        audio_proc = subprocess.Popen(audio_cmd, stdin=subprocess.PIPE, text=True)
-        sacn_proc = subprocess.Popen(sacn_cmd, stdin=subprocess.PIPE, text=True)
-        
+        audio_cmd = [sys.executable, "-u", audio_script, audio_path,
+                     "--offset", str(fm_offset_s), "--speaker-offset", str(speaker_offset_s)]
+        sacn_cmd = [sys.executable, "-u", sacn_script, sequence_path, "--universe", str(universe),
+                    "--button-hold", str(button_hold), "--multicast",
+                    "--speed", str(light_speed)]
+
+        popen_kw = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1)
+        audio_proc = subprocess.Popen(audio_cmd, **popen_kw)
+        sacn_proc = subprocess.Popen(sacn_cmd, **popen_kw)
+
         processes.extend([audio_proc, sacn_proc])
         active_processes = processes
 
-        time.sleep(0.2)
+        audio_ready, sacn_ready = threading.Event(), threading.Event()
+        for name, proc, ev in (("audio", audio_proc, audio_ready), ("sacn", sacn_proc, sacn_ready)):
+            threading.Thread(target=_pump_output, args=(proc, name, ev), daemon=True).start()
 
-        print(f"[SYNC] T0 Clock Lock Engaged @ {t0:.3f}s. Audio & sACN Active.")
-        trigger_msg = f"{t0}\n"
+        # Phase 1: both workers do ALL slow setup (imports, file decode, FM carrier, mixer load)
+        # and report READY. T0 is only chosen afterwards, so a slow start can never put the
+        # lights and audio out of step.
+        _wait_until_ready([("audio", audio_proc, audio_ready), ("sacn", sacn_proc, sacn_ready)],
+                          ready_timeout_s)
 
-        if audio_proc.stdin:
-            audio_proc.stdin.write(trigger_msg)
-            audio_proc.stdin.flush()
-        if sacn_proc.stdin:
-            sacn_proc.stdin.write(trigger_msg)
-            sacn_proc.stdin.flush()
-        
-        audio_proc.wait()
+        # Phase 2: hand both workers the same start instant on the shared monotonic clock.
+        t0 = time.monotonic() + lead_time_s
+        print(f"[SYNC] Both workers ready. T0 Clock Lock Engaged: starting in {lead_time_s:.2f}s.")
+        trigger_msg = f"{t0!r}\n"
+        for proc in (audio_proc, sacn_proc):
+            proc.stdin.write(trigger_msg)
+            proc.stdin.flush()
 
-        try:
-            sacn_proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            sacn_proc.terminate()
+        # Phase 3: wait for BOTH to finish. The audio process can exit well before the sound
+        # has actually played out (FM pipe/buffers), and lights may be held on purpose
+        # (button_hold_s), so never cut the lights off just because audio returned first.
+        first_exit = None
+        # The lights are *meant* to outlast the audio by button_hold_s, so the hang guard has to
+        # allow for it, or a long hold gets the transmitter killed mid-hold.
+        end_grace_s += float(button_hold)
+        while True:
+            audio_done = audio_proc.poll() is not None
+            sacn_done = sacn_proc.poll() is not None
+            if audio_done and sacn_done:
+                break
+            if audio_done or sacn_done:
+                if first_exit is None:
+                    first_exit = time.monotonic()
+                elif time.monotonic() - first_exit > end_grace_s:
+                    laggard = "sacn" if audio_done else "audio"
+                    print(f"[WARN] {laggard} worker still running {end_grace_s:.0f}s after the other "
+                          f"finished; terminating it.", file=sys.stderr)
+                    break
+            time.sleep(0.05)
+
+        for name, proc in (("audio", audio_proc), ("sacn", sacn_proc)):
+            if proc.poll() not in (None, 0):
+                print(f"[WARN] {name} worker exited with code {proc.returncode}", file=sys.stderr)
 
         print(f"[SHOW] Track '{now_playing_title}' completed cleanly")
 
@@ -383,7 +478,7 @@ def run_track(track_idx, playlist, telemetry=None):
             if proc.poll() is None:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=1.0)
+                    proc.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
         active_processes = []
@@ -463,7 +558,6 @@ def main():
                 break
 
         print("\n[SHOW] Playlist execution finished.")
-        graceful_shutdown(telemetry)
 
     except Exception as e:
         print(f"[ERROR] Unexpected exception in main show loop: {e}")
