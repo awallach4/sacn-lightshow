@@ -49,7 +49,7 @@ const toast = useToast()
 // Fetch raw JSON configuration from server
 const loadPlaylistConfig = async () => {
   try {
-    const res = await fetch('/api/playlist/config')
+    const res = await fetch('/api/config/playlist')
     if (!res.ok) return
     const data = await res.json()
 

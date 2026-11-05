@@ -5,6 +5,7 @@ import { ref } from 'vue'
 
 const editing_main = ref<boolean>(false)
 const editing_patch = ref<boolean>(false)
+const editing_schedule = ref<boolean>(false)
 
 useSeoMeta({
   title: 'Settings',
@@ -22,6 +23,7 @@ useSeoMeta({
     <div class="flex gap-4 justify-center">
       <UButton label="Edit main_config.json" @click="editing_main = true" />
       <UButton label="Edit patch.json" @click="editing_patch = true" />
+      <UButton label="Edit schedule.json" @click="editing_schedule = true" />
     </div>
     <JSONEditor
       v-model:open="editing_main"
@@ -29,5 +31,10 @@ useSeoMeta({
       endpoint="/api/config/main_config"
     />
     <JSONEditor v-model:open="editing_patch" title="Edit patch.json" endpoint="/api/config/patch" />
+    <JSONEditor
+      v-model:open="editing_schedule"
+      title="Edit schedule.json"
+      endpoint="/api/config/schedule"
+    />
   </UPage>
 </template>

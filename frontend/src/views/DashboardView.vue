@@ -37,7 +37,26 @@ const isHostLoading = reactive<Record<string, boolean>>({
   shutdown: false,
 })
 
+const selected_playlist = ref<string>('')
+const playlists = ref<string[]>([])
+
 let pollInterval: ReturnType<typeof setInterval> | null = null
+
+const loadPlaylistConfig = async () => {
+  try {
+    const res = await fetch('/api/config/playlist')
+    if (!res.ok) return
+    const data = await res.json()
+
+    const parsed = JSON.parse(data.content)
+    if (parsed.playlists) {
+      playlists.value = Object.keys(parsed.playlists)
+    }
+  } catch {
+    // Quiet handling when dev server is offline
+    toast.add({ title: 'Error', description: 'Failed to fetch playlist.json', color: 'error' })
+  }
+}
 
 // Poll backend telemetry quietly
 const fetchTelemetry = async () => {
@@ -52,8 +71,8 @@ const fetchTelemetry = async () => {
     cpu_usage.value = data.cpu_usage
     ram_usage.value = data.ram_usage
     cpu_temp.value = data.cpu_temp
-    current_song.value = data.current_song
-    next_song.value = data.next_song
+    current_song.value = data.now_playing
+    next_song.value = data.next_up
 
     if (data.node_status) {
       node_status.value = data.node_status
@@ -62,6 +81,41 @@ const fetchTelemetry = async () => {
   } catch {
     // Quietly catch network drops to avoid flooding the console
     isBackendConnected.value = false
+  }
+}
+
+const startShow = async () => {
+  if (!selected_playlist.value) {
+    toast.add({
+      title: 'Command Failed',
+      description: `Could not execute 'Start Show', please select a playlist.`,
+      color: 'error',
+    })
+    return
+  }
+  isMacroLoading['start_show'] = true
+  try {
+    const res = await fetch('/api/show/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playlist: selected_playlist.value }),
+    })
+
+    if (!res.ok) throw new Error(`Server returned status ${res.status}`)
+
+    toast.add({
+      title: 'Macro Sent',
+      description: `Action: 'Start Show' successfully dispatched.`,
+      color: 'success',
+    })
+  } catch (err) {
+    toast.add({
+      title: 'Command Failed',
+      description: `Could not execute 'Start Show'. Error: ${err}`,
+      color: 'error',
+    })
+  } finally {
+    isMacroLoading['start_show'] = false
   }
 }
 
@@ -82,11 +136,10 @@ const sendMacro = async (action: string) => {
       description: `Action '${action}' successfully dispatched.`,
       color: 'success',
     })
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
   } catch (err) {
     toast.add({
       title: 'Command Failed',
-      description: `Could not execute '${action}'. Verify backend service.`,
+      description: `Could not execute '${action}'. Error: ${err}`,
       color: 'error',
     })
   } finally {
@@ -121,6 +174,7 @@ const executeHostAction = async (cmd: 'reboot' | 'shutdown') => {
 }
 
 onMounted(() => {
+  loadPlaylistConfig()
   fetchTelemetry()
   pollInterval = setInterval(fetchTelemetry, 1000)
 })
@@ -168,35 +222,15 @@ useSeoMeta({
 
         <!-- Show Macros -->
         <UPageCard title="Show Macros" variant="subtle">
+          <USelect v-model="selected_playlist" :items="playlists" placeholder="Select a Playlist" />
           <UButton
             class="justify-center text-neutral-900"
             :loading="isMacroLoading.start_show"
             :disabled="current_song.length > 0"
-            @click="sendMacro('start_show')"
+            @click="startShow()"
           >
             Start Show
           </UButton>
-
-          <div class="w-full flex justify-between gap-4">
-            <UButton
-              color="neutral"
-              class="w-full justify-center"
-              :loading="isMacroLoading.prev_track"
-              :disabled="current_song.length < 1"
-              @click="sendMacro('prev_track')"
-            >
-              Previous Track
-            </UButton>
-            <UButton
-              color="neutral"
-              class="w-full justify-center"
-              :loading="isMacroLoading.next_track"
-              :disabled="current_song.length < 1 || next_song.length < 1"
-              @click="sendMacro('next_track')"
-            >
-              Next Track
-            </UButton>
-          </div>
 
           <UButton
             color="info"

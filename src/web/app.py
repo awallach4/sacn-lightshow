@@ -1,16 +1,45 @@
+import sys
+
+
+def _fatal_import(exc):
+    """Explain a missing/broken dependency in terms of the exact interpreter that failed."""
+    print(f"[Flask] FATAL: could not import a required package: {exc}", file=sys.stderr, flush=True)
+    print(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})", file=sys.stderr, flush=True)
+    print(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt", file=sys.stderr, flush=True)
+    print("[Flask]   (Ubuntu 23.04+ blocks system-wide pip installs: use a venv, and start main.py with that "
+          "venv's python, also under sudo.)", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+# gevent must patch the standard library BEFORE anything else is imported. Without it, every blocking
+# call in a request handler (e.g. the HTTP call to the Initializer in /api/telemetry) freezes the whole
+# server, including the panic button, until it returns.
+try:
+    from gevent import monkey
+    monkey.patch_all()
+except ImportError as _exc:
+    _fatal_import(_exc)
+
 import os
 import json
-import sys
+import time
 import platform
 import subprocess
-from gevent.pywsgi import WSGIServer
-from geventwebsocket.handler import WebSocketHandler
-import psutil
 from pathlib import Path
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
-from werkzeug.utils import secure_filename
-import sacn
+import urllib.request
+import urllib.error
+
+try:
+    import gevent
+    from gevent.pywsgi import WSGIServer
+    from geventwebsocket.handler import WebSocketHandler
+    import psutil
+    from flask import Flask, jsonify, request, send_from_directory
+    from flask_cors import CORS
+    from werkzeug.utils import secure_filename
+    import sacn
+except ImportError as _exc:
+    _fatal_import(_exc)
 
 # Resolve base directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -27,17 +56,17 @@ else:
 STATE_FILE_PATH = IPC_DIR / "show_state.json"
 CMD_FILE_PATH = IPC_DIR / "show_macro_cmd.json"
 
-app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
+# Initializer Node IPC Endpoint
+INIT_NODE_URL = "http://127.0.0.1:5001"
+
+# static_folder=None: Flask's built-in static route would otherwise capture every path ahead of the
+# routes below, so SPA deep links (e.g. /playlist) 404 and /api typos return HTML instead of JSON.
+app = Flask(__name__, static_folder=None)
 CORS(app)  # Allows Vite dev server (http://localhost:5173) to query API directly
 
-###############################################################################
-#                           Dashboard Backend                                 #
-###############################################################################
-
-# Cross-platform CPU temperature reader
 def get_cpu_temp() -> float:
+    """Cross-platform CPU temperature reader."""
     if IS_WINDOWS:
-        # Standard Windows hardware monitor check via WMI/psutil if available
         try:
             temps = getattr(psutil, "sensors_temperatures", lambda: {})()
             if temps:
@@ -46,10 +75,9 @@ def get_cpu_temp() -> float:
                         return round(entries[0].current, 1)
         except Exception:
             pass
-        return 0.0  # Safe fallback for Windows dev machines without thermal sensors exposed
+        return 0.0
     else:
         try:
-            # Raspberry Pi thermal zone
             with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
                 return round(float(f.read().strip()) / 1000.0, 1)
         except Exception:
@@ -57,6 +85,31 @@ def get_cpu_temp() -> float:
             if "cpu_thermal" in temps and temps["cpu_thermal"]:
                 return round(temps["cpu_thermal"][0].current, 1)
             return 0.0
+
+
+def query_initializer_node(endpoint: str, method: str = "GET", payload: dict = None) -> tuple[dict, int]:
+    """Helper function to proxy HTTP IPC requests to the Initializer Node on port 5001."""
+    url = f"{INIT_NODE_URL}{endpoint}"
+    try:
+        data = json.dumps(payload).encode("utf-8") if payload else None
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"} if data else {},
+            method=method
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return body, resp.status
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            err_body = {"error": "IPC call failed"}
+        return err_body, e.code
+    except Exception as e:
+        return {"error": f"Initializer Node unreachable: {str(e)}"}, 503
+
 
 # -------------------------------------------------------------------
 # SPA Routing (Serves production Vue build)
@@ -67,16 +120,20 @@ def serve_index():
         return send_from_directory(DIST_DIR, "index.html")
     return jsonify({"status": "API active", "note": "Vue dist build not found. Run Vite dev server."}), 200
 
+
 @app.route("/<path:path>")
 def serve_static(path):
+    if path.startswith("api/"):
+        return jsonify({"error": f"Unknown API endpoint '/{path}'"}), 404
     if (DIST_DIR / path).exists():
         return send_from_directory(DIST_DIR, path)
     elif (DIST_DIR / "index.html").exists():
         return send_from_directory(DIST_DIR, "index.html")
     return jsonify({"error": "Not found"}), 404
 
+
 # -------------------------------------------------------------------
-# Telemetry Endpoint (Host Status, Node Status & Show State)
+# Telemetry Endpoint (Host Resource Metrics & Initializer Process States)
 # -------------------------------------------------------------------
 @app.route("/api/telemetry", methods=["GET"])
 def get_telemetry():
@@ -85,41 +142,36 @@ def get_telemetry():
     ram_usage = psutil.virtual_memory().percent
     cpu_temp = get_cpu_temp()
 
-    # 2. Defaults for Show & Node Status
-    show_state = {
-        "current_song": "",
-        "next_song": "",
-        "node_status": {
-            "sACN Transmitter": False,
-            "Audio Playback": False,
-            "Show Control": False,
-            "Scheduler": False,
-            "Web Controls": True
-        }
+    # 2. Query Initializer Node for process states
+    init_data, status_code = query_initializer_node("/api/status", method="GET")
+
+    system_state = "UNKNOWN"
+    node_status = {
+        "sACN Listener": False,
+        "Show Control": False,
+        "Scheduler": False,
+        "Web Backend": True
     }
 
-    # 3. Read IPC JSON snapshot if present
-    if STATE_FILE_PATH.is_file():
-        try:
-            with open(STATE_FILE_PATH, "r") as f:
-                ram_data = json.load(f)
-                
-                show_state["current_song"] = ram_data.get("current_song", show_state["current_song"])
-                show_state["next_song"] = ram_data.get("next_song", show_state["next_song"])
-                
-                if "node_status" in ram_data:
-                    show_state["node_status"].update(ram_data["node_status"])
-        except Exception:
-            pass
+    if status_code == 200 and "nodes" in init_data:
+        system_state = init_data.get("system_state", "OFF")
+        nodes = init_data["nodes"]
+
+        node_status["sACN Listener"] = nodes.get("sacn_listener", {}).get("status") == "RUNNING"
+        node_status["Show Control"] = nodes.get("show_control", {}).get("status") == "RUNNING"
+        node_status["Scheduler"] = nodes.get("scheduler", {}).get("status") == "RUNNING"
+        node_status["Web Backend"] = True
 
     return jsonify({
         "cpu_usage": cpu_usage,
         "ram_usage": ram_usage,
         "cpu_temp": cpu_temp,
-        "node_status": show_state["node_status"],
-        "current_song": show_state["current_song"],
-        "next_song": show_state["next_song"]
+        "system_state": system_state,
+        "node_status": node_status,
+        "now_playing": init_data.get("now_playing", ""),
+        "next_up": init_data.get("next_up", "")
     }), 200
+
 
 # -------------------------------------------------------------------
 # Show Macro Controls
@@ -127,40 +179,63 @@ def get_telemetry():
 @app.route("/api/macro", methods=["POST"])
 def execute_macro():
     payload = request.get_json() or {}
-    action = payload.get("action")
+    action = str(payload.get("action", "")).strip().lower()
 
-    valid_actions = ["start_show", "prev_track", "next_track", "all_on", "blackout", "panic"]
-    if action not in valid_actions:
-        return jsonify({"error": f"Invalid action. Options: {valid_actions}"}), 400
+    # Map all possible frontend string variants to Initializer Node commands
+    macro_map = {
+        "on": "ON",
+        "all_on": "ON",
+        "off": "OFF",
+        "blackout": "OFF",
+        "panic": "PANIC"
+    }
 
-    try:
-        with open(CMD_FILE_PATH, "w") as f:
-            json.dump({"action": action}, f)
-        return jsonify({"status": "success", "executed_action": action}), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to send macro command: {str(e)}"}), 500
+    if action not in macro_map:
+        return jsonify({"error": f"Invalid macro action '{action}'"}), 400
+
+    target_action = macro_map[action]
+    init_payload = {"action": target_action}
+    if target_action == "ON" and "level" in payload:
+        init_payload["level"] = payload["level"]
+
+    res_body, status_code = query_initializer_node("/api/macro", method="POST", payload=init_payload)
+    return jsonify(res_body), status_code
+
+# -------------------------------------------------------------------
+# Show Control Start Endpoint
+# -------------------------------------------------------------------
+@app.route("/api/show/start", methods=["POST"])
+def start_show():
+    payload = request.get_json() or {}
+    playlist = payload.get("playlist")
+
+    if not playlist:
+        return jsonify({"error": "Missing 'playlist' parameter"}), 400
+
+    res_body, status_code = query_initializer_node(
+        "/api/show/start",
+        method="POST",
+        payload={"playlist": playlist}
+    )
+    return jsonify(res_body), status_code
+
 
 # -------------------------------------------------------------------
 # Host Controls (Reboot & Shutdown)
 # -------------------------------------------------------------------
 @app.route("/api/host/<command>", methods=["POST"])
 def host_control(command):
-    if command not in ["reboot", "shutdown"]:
-        return jsonify({"error": "Invalid host command"}), 400
+    cmd = command.lower()
+    if cmd not in ["reboot", "shutdown"]:
+        return jsonify({"error": "Invalid host command. Options: ['reboot', 'shutdown']"}), 400
 
-    try:
-        if IS_WINDOWS:
-            # Safe Windows simulated log for local testing
-            print(f"[WINDOWS DEV] Host action triggered: {command}")
-        else:
-            if command == "reboot":
-                subprocess.Popen(["sudo", "systemctl", "reboot"])
-            elif command == "shutdown":
-                subprocess.Popen(["sudo", "systemctl", "poweroff"])
-            
-        return jsonify({"status": "success", "message": f"Host {command} sequence initiated"}), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to execute host action: {str(e)}"}), 500
+    # Delegate host power commands to Initializer Node so it can cleanly stop services first
+    res_body, status_code = query_initializer_node(
+        "/api/host",
+        method="POST",
+        payload={"action": cmd}
+    )
+    return jsonify(res_body), status_code
 
 ###############################################################################
 #                          Config & Playlist Backend                          #
@@ -177,6 +252,7 @@ CONFIG_FILES = {
     "main_config": CONFIG_DIR / "main_config.json",
     "patch": CONFIG_DIR / "patch.json",
     "playlist": CONFIG_DIR / "playlist.json",
+    "schedule": CONFIG_DIR / "schedule.json"
 }
 
 # Ensure target directories exist on server start
@@ -336,10 +412,53 @@ sacn_sender.start()
 
 # Active universe registration tracking
 active_universes = set()
+last_console_frame = 0.0
+
+# The console is a remote focus unit: when nobody has touched it for this long, stop sending so the last
+# look doesn't linger and reappear between shows. (Deactivating sends stream-terminated packets.)
+CONSOLE_IDLE_RELEASE_S = 600.0
+
+
+def release_console_outputs() -> list:
+    """Zero and deactivate every universe the console is driving. Returns the universes released."""
+    released = sorted(active_universes)
+    for universe in released:
+        try:
+            sacn_sender[universe].dmx_data = (0,) * 512
+        except Exception:
+            pass
+    if released:
+        gevent.sleep(0.1)  # let the sender thread push the zeros out first
+    for universe in released:
+        try:
+            sacn_sender.deactivate_output(universe)
+        except Exception:
+            pass
+    active_universes.clear()
+    return released
+
+
+def _console_idle_watchdog():
+    while True:
+        gevent.sleep(5.0)
+        if active_universes and time.monotonic() - last_console_frame > CONSOLE_IDLE_RELEASE_S:
+            print(f"[Flask] Console idle for {CONSOLE_IDLE_RELEASE_S:.0f}s; releasing universes {sorted(active_universes)}.", flush=True)
+            release_console_outputs()
+
+
+gevent.spawn(_console_idle_watchdog)
+
+
+@app.route("/api/sacn/release", methods=["POST"])
+def sacn_release_handler():
+    """Stops all console output (zero + stream termination) so the console no longer holds anything."""
+    return jsonify({"status": "released", "universes": release_console_outputs()}), 200
 
 @app.route("/api/sacn/stream", methods=["POST"])
 def sacn_stream_handler():
     """Receives DMX frame from frontend parser and broadcasts sACN at Priority 50."""
+    global last_console_frame
+    last_console_frame = time.monotonic()
     payload = request.get_json() or {}
     priority = payload.get("priority", 50)
     frame = payload.get("frame", {})  # Key format: "universe/address" -> dmxValue (0-255)
@@ -374,6 +493,6 @@ def sacn_stream_handler():
     return jsonify({"status": "transmitting", "priority": priority, "universes": list(universe_buffers.keys())}), 200
 
 if __name__ == "__main__":
-    print("[Flask] Starting gevent WGSI server on port 5000...")
+    print("[Flask] Starting gevent WSGI server on port 5000...", flush=True)
     http_server = WSGIServer(("0.0.0.0", 5000), app, handler_class=WebSocketHandler)
     http_server.serve_forever()

@@ -13,9 +13,10 @@ Usage:
 Optional main_config.json keys (all have defaults):
     system.sync.lead_time_s       runway between "workers ready" and T0 (default 1.0)
     system.sync.ready_timeout_s   max seconds to wait for workers to finish setup (default 60)
-    system.sync.end_grace_s       hang guard after one worker finishes (default 15; the
-                                  track's button_hold_s is added automatically)
+    system.sync.end_grace_s       extra seconds past the track's expected end (sequence/audio length +
+                                  button_hold_s) before a stuck worker is killed (default 15)
     system.sync.light_speed       light playback speed multiplier, e.g. 0.98 (default 1.0)
+    system.broadcast.fm_enabled        false = no FM carrier; audio plays on local speakers (default true)
     system.broadcast.audio_offset_s    shift FM audio vs lights; + = later (default 0.0)
     system.broadcast.speaker_offset_s  shift monitor speakers vs lights (default 0.0)
 """
@@ -29,6 +30,7 @@ import threading
 import subprocess
 import argparse
 from pathlib import Path
+import urllib.request
 
 try:
     import psutil
@@ -40,10 +42,14 @@ SRC_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SRC_DIR.parent
 DEFAULT_MAIN_CONFIG = PROJECT_ROOT / "config" / "main_config.json"
 
+# Where the web uploader stores files; used to resolve bare filenames in playlist.json
+ASSET_DIRS = {"audio": "showfiles/music", "sequence": "showfiles/sequences"}
+
 # Global Execution State
 is_panicked = False
 fm_carrier_proc = None
 active_processes = []
+is_terminating = False
 sys_config = {}
 
 # ==============================================================================
@@ -58,11 +64,12 @@ def parse_args():
         default=DEFAULT_MAIN_CONFIG,
         help="Path to main system configuration JSON (default: config/main_config.json)"
     )
+    parser.add_argument("-p", "--playlist", type=str, default="", help="The name of the playlist in playlist.json to use.")
     return parser.parse_args()
 
-def load_system_configs(main_config_path):
+def load_system_configs(args):
     """Loads main_config.json and cleanly resolves linked playlist asset paths against PROJECT_ROOT."""
-    abs_main_path = Path(main_config_path).resolve()
+    abs_main_path = Path(args.config).resolve()
 
     if not abs_main_path.is_file():
         print(f"[ERROR] Main config file not found: {abs_main_path}", file=sys.stderr)
@@ -85,7 +92,7 @@ def load_system_configs(main_config_path):
     with open(playlist_path, "r") as f:
         playlist_file_data = json.load(f)
 
-    target_playlist_name = sys_settings.get("playlist_name", "playlist") or paths.get("playlist_name", "playlist")
+    target_playlist_name = args.playlist if len(args.playlist) > 0 else (sys_settings.get("playlist_name", "playlist") or paths.get("playlist_name", "playlist"))
 
     if isinstance(playlist_file_data, dict):
         if target_playlist_name not in playlist_file_data['playlists'].keys():
@@ -107,6 +114,12 @@ def load_system_configs(main_config_path):
 
             if not p.is_absolute():
                 resolved_asset = (PROJECT_ROOT / raw_asset_path.lstrip("/\\")).resolve()
+                # The web uploader stores bare filenames and saves the files under showfiles/.
+                # If the path isn't valid as written, look there too.
+                if not resolved_asset.exists():
+                    fallback = (PROJECT_ROOT / ASSET_DIRS[key] / raw_asset_path.lstrip("/\\")).resolve()
+                    if fallback.exists():
+                        resolved_asset = fallback
             else:
                 resolved_asset = p.resolve()
 
@@ -115,154 +128,133 @@ def load_system_configs(main_config_path):
     return sys_settings, playlist_data
 
 # ==============================================================================
-# TELEMETRY & SYSTEM HEALTH
+# TELEMETRY
 # ==============================================================================
 
-class ShowTelemetry:
-    """Thread-safe background collector writing JSON snapshots to RAM (/dev/shm)."""
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.state = {
-            "show_state": "INITIALIZING",
-            "playlist": {
-                "current_index": 0,
-                "total_tracks": 0,
-                "now_playing": "None",
-                "next_up": "None"
-            },
-            "system_health": {
-                "cpu_usage_pct": 0.0,
-                "memory_usage_pct": 0.0,
-                "cpu_temp_c": 0.0
-            },
-            "node_status": {
-                "fm_transmitter": "OFFLINE",
-                "sacn_engine": "OFFLINE"
-            },
-            "timestamp": time.time()
-        }
-        self._running = True
-        self._thread = threading.Thread(target=self._health_loop, daemon=True)
-        self._thread.start()
-
-    def _health_loop(self):
-        while self._running:
-            cpu_pct = psutil.cpu_percent(interval=None) if psutil else 0.0
-            ram_pct = psutil.virtual_memory().percent if psutil else 0.0
-            
-            temp_c = 0.0
-            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
-                try:
-                    with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                        temp_c = round(float(f.read().strip()) / 1000.0, 1)
-                except Exception:
-                    pass
-
-            with self._lock:
-                self.state["system_health"]["cpu_usage_pct"] = cpu_pct
-                self.state["system_health"]["memory_usage_pct"] = ram_pct
-                self.state["system_health"]["cpu_temp_c"] = temp_c
-                self.state["timestamp"] = time.time()
-
-            if os.name != 'nt' and os.path.exists("/dev/shm"):
-                try:
-                    tmp_file = "/dev/shm/show_state.json.tmp"
-                    target_file = "/dev/shm/show_state.json"
-                    with open(tmp_file, "w") as f:
-                        json.dump(self.get_snapshot(), f)
-                    os.replace(tmp_file, target_file)
-                except Exception:
-                    pass
-
-            time.sleep(1.5)
-
-    def update_track_state(self, current_idx, total, now_playing, next_up, show_state="PLAYING"):
-        with self._lock:
-            self.state["show_state"] = show_state
-            self.state["playlist"]["current_index"] = current_idx
-            self.state["playlist"]["total_tracks"] = total
-            self.state["playlist"]["now_playing"] = now_playing
-            self.state["playlist"]["next_up"] = next_up
-
-    def set_show_state(self, status):
-        with self._lock:
-            self.state["show_state"] = status
-
-    def set_node_status(self, node_key, status):
-        with self._lock:
-            self.state["node_status"][node_key] = status
-
-    def get_snapshot(self):
-        with self._lock:
-            return self.state.copy()
-
-    def stop(self):
-        self._running = False
+def notify_current_track(now_playing: str, next_up: str):
+    """Notify Initializer Node of current track state without heavy file I/O or extra threads."""
+    try:
+        url = "http://127.0.0.1:5001/api/show/progress"
+        payload = json.dumps({"now_playing": now_playing, "next_up": next_up}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=1.0):
+            pass
+    except Exception:
+        pass
 
 # ==============================================================================
 # EMERGENCY PANIC & HARDWARE SAFETY
 # ==============================================================================
 
-def send_sacn_blackout(universe, priority):
-    """Flushes 0% DMX values across all 8 SSR channels."""
+INIT_NODE_URL = "http://127.0.0.1:5001"
+
+# GOOD: Local sACN blackout frame without IPC macro POSTs
+def send_sacn_blackout(universe=11, priority=100):
+    """Sends a zero-value sACN blackout frame directly to the network."""
     try:
         import sacn
-        sender = sacn.sACNsender()
+        sender = sacn.sACNsender(source_name="ShowControl_InterTrack")
         sender.start()
         sender.activate_output(universe)
         sender[universe].priority = priority
-        sender[universe].dmx_data = [0] * 8
+        sender[universe].dmx_data = (0,) * 512
         time.sleep(0.05)
+        sender.deactivate_output(universe)
         sender.stop()
-    except ImportError:
-        pass
+    except Exception as e:
+        print(f"[SHOW] Warning: Could not send sACN blackout frame: {e}", file=sys.stderr)
 
-def emergency_panic_latch(signum=None, frame=None):
-    """
-    Theatrical Emergency Panic Latch.
-    Overrides all control, halts audio immediately, and streams a 
-    Priority 200 blackout frame to force all SSR channels OFF.
-    """
-    global is_panicked, fm_carrier_proc, active_processes, sys_config
-    if is_panicked:
-        return
-    
-    is_panicked = True
-    print("\n[EMERGENCY] Panic Latch Activated! Overriding show control...")
 
-    # 1. Terminate all active worker subprocesses
+def terminate_all_children():
+    """
+    Instantly mass-kills all registered child processes AND their entire 
+    process groups using POSIX SIGKILL to prevent orphaned audio/sACN threads.
+    """
+    global active_processes, fm_carrier_proc
+
+    print("[SHOW CONTROL] Mass-terminating process groups...", flush=True)
+
+    # 1. Kill active track worker process groups (audio + sACN)
     for proc in active_processes:
-        if proc.poll() is None:
-            proc.terminate()
+        if proc and proc.poll() is None:
+            try:
+                if os.name != 'nt':
+                    # Send SIGKILL (-9) to the ENTIRE process group
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    # Windows fallback: taskkill /F /T terminates process tree
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], 
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                print(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}", file=sys.stderr)
 
-    # 2. Issue high-priority sACN blackout frame (Priority 200)
-    net_cfg = sys_config.get("network", {})
-    universe = net_cfg.get("sacn_universe", 1)
-    panic_priority = net_cfg.get("priority_panic", 200)
+    active_processes.clear()
 
-    print(f"[EMERGENCY] Streaming Priority {panic_priority} blackout packet to Universe {universe}...")
-    send_sacn_blackout(universe=universe, priority=panic_priority)
-
-    # 3. Clean up persistent FM carrier process & FIFO pipe
+    # 2. Terminate persistent FM carrier process group
     if fm_carrier_proc and fm_carrier_proc.poll() is None:
-        print("[EMERGENCY] Terminating FM transmitter carrier...")
-        fm_carrier_proc.terminate()
+        try:
+            print("[SHOW CONTROL] Killing FM carrier process group...", flush=True)
+            if os.name != 'nt':
+                os.killpg(os.getpgid(fm_carrier_proc.pid), signal.SIGKILL)
+            else:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(fm_carrier_proc.pid)], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"[SHOW CONTROL] Error killing FM carrier: {e}", file=sys.stderr)
+        fm_carrier_proc = None
 
-    fifo_path = sys_config.get("broadcast", {}).get("fifo_path", "/tmp/fm_audio.fifo")
+
+def cleanup_and_exit(signum=None, frame=None):
+    """
+    Universal Signal Handler for SIGINT, SIGTERM, and unexpected exits.
+    Ensures audio and sACN sub-processes stop instantly when show_control is killed.
+    """
+    global is_terminating
+    if is_terminating:
+        return
+    is_terminating = True
+
+    sig_name = signal.Signals(signum).name if signum else "INTERNAL_CLEANUP"
+    print(f"\n[SHOW CONTROL] Signal received ({sig_name}). Executing immediate process group purge...", flush=True)
+
+    # Nuke all child audio, sACN, and worker processes instantly
+    terminate_all_children()
+
+    # Clean up FIFO pipe
+    fifo_path = "/tmp/fm_audio.fifo"
     if os.path.exists(fifo_path):
         try:
             os.remove(fifo_path)
         except OSError:
             pass
 
-    print("[EMERGENCY] System locked in safe blackout state. Exiting.")
+    print("[SHOW CONTROL] All process groups terminated and hardware interfaces released. Exiting.", flush=True)
     sys.exit(0)
+
+def emergency_panic_latch(signum=None, frame=None):
+    """Theatrical Emergency Panic Latch - triggers panic on Initializer Node then cleans up."""
+    print("\n[EMERGENCY] Panic Latch Triggered! Dispatching PANIC to Initializer Node...", flush=True)
+    try:
+        url = f"{INIT_NODE_URL}/api/macro"
+        payload = json.dumps({"action": "PANIC"}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=1.0):
+            pass
+    except Exception as e:
+        print(f"[EMERGENCY] Failed to notify Initializer Node: {e}", file=sys.stderr)
+
+    cleanup_and_exit(signum, frame)
 
 # ==============================================================================
 # FM TRANSMITTER CARRIER MANAGEMENT
 # ==============================================================================
 
-def init_persistent_fm_carrier(telemetry):
+def init_persistent_fm_carrier():
     """Creates the FIFO pipe and launches persistent pi_fm_rds."""
     global fm_carrier_proc, sys_config
 
@@ -271,9 +263,12 @@ def init_persistent_fm_carrier(telemetry):
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
     fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
 
+    if not broadcast_cfg.get("fm_enabled", True):
+        print("[INIT] FM transmitter disabled by config (broadcast.fm_enabled = false).")
+        return
+
     if os.name == 'nt':
         print("[INIT] Windows OS detected. FM transmitter initialization skipped.")
-        telemetry.set_node_status("fm_transmitter", "MOCKED (Windows)")
         return
 
     if not os.path.exists(fifo_path):
@@ -293,7 +288,6 @@ def init_persistent_fm_carrier(telemetry):
         stderr=subprocess.DEVNULL
     )
     time.sleep(0.5)
-    telemetry.set_node_status("fm_transmitter", f"ACTIVE ({freq:.1f} MHz)")
 
 # ==============================================================================
 # PLAYLIST EXECUTION LOOP
@@ -313,11 +307,12 @@ def check_track_lengths(audio_path, sequence_path):
         out = subprocess.run(["soxi", "-D", audio_path], capture_output=True, text=True, timeout=10)
         audio_s = float(out.stdout.strip())
     except Exception:
-        return  # soxi missing / unreadable header: skip silently
+        return None, None  # soxi missing / unreadable header: skip silently
     print(f"[CHECK] audio {audio_s:.2f}s vs sequence {seq_s:.2f}s (difference {seq_s - audio_s:+.2f}s)")
     if abs(seq_s - audio_s) > 0.5:
         print("[CHECK] WARNING: sequence and audio lengths differ by more than 0.5s. If the sequence is "
               "SHORTER, the lights end early by design of the file (re-render/re-export in xLights).")
+    return audio_s, seq_s
 
 
 def _pump_output(proc, name, ready_event):
@@ -347,9 +342,32 @@ def _wait_until_ready(workers, timeout_s):
         time.sleep(0.02)
 
 
-def run_track(track_idx, playlist, telemetry=None):
+def kill_process_group_instantly(proc):
+    """Forcefully kills a subprocess and its process group while closing pipes."""
+    if not proc or proc.poll() is not None:
+        return
+
+    # Close standard pipes to unblock _pump_output daemon threads
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    # Issue instant SIGKILL to the entire process group
+    try:
+        if os.name != 'nt':
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except Exception:
+        pass
+
+
+def run_track(track_idx, playlist):
     """Executes a track by index from the master playlist with T0 clock sync."""
-    global active_processes, sys_config
+    global active_processes, sys_config, is_terminating, is_panicked
     total_tracks = len(playlist)
     
     if not (0 <= track_idx < total_tracks):
@@ -367,6 +385,8 @@ def run_track(track_idx, playlist, telemetry=None):
     else:
         next_up_title = "Show Complete"
 
+    notify_current_track(now_playing=now_playing_title, next_up=next_up_title)
+
     if not os.path.isfile(audio_path):
         print(f"[ERROR] Audio file missing: {audio_path}", file=sys.stderr)
         return False
@@ -378,15 +398,6 @@ def run_track(track_idx, playlist, telemetry=None):
     print(f"[SHOW] Executing Track [{track_idx + 1}/{total_tracks}]: {now_playing_title}")
     print(f"[SHOW] Sequence Target: {os.path.basename(sequence_path)}")
     print(f"==================================================")
-
-    if telemetry:
-        telemetry.update_track_state(
-            current_idx=track_idx + 1,
-            total=total_tracks,
-            now_playing=now_playing_title,
-            next_up=next_up_title,
-            show_state="PLAYING"
-        )
 
     processes = []
     try:
@@ -405,10 +416,12 @@ def run_track(track_idx, playlist, telemetry=None):
         button_hold = current_track.get("button_hold_s", 0)
 
         light_speed = sync_cfg.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
-        check_track_lengths(audio_path, sequence_path)
+        audio_s, seq_s = check_track_lengths(audio_path, sequence_path)
 
         audio_cmd = [sys.executable, "-u", audio_script, audio_path,
                      "--offset", str(fm_offset_s), "--speaker-offset", str(speaker_offset_s)]
+        if not broadcast_cfg.get("fm_enabled", True):
+            audio_cmd.append("--no-fm")
         sacn_cmd = [sys.executable, "-u", sacn_script, sequence_path, "--universe", str(universe),
                     "--button-hold", str(button_hold), "--multicast",
                     "--speed", str(light_speed)]
@@ -421,17 +434,24 @@ def run_track(track_idx, playlist, telemetry=None):
         processes.extend([audio_proc, sacn_proc])
         active_processes = processes
 
+        try:
+            url = f"{INIT_NODE_URL}/api/show/register_workers"
+            payload = json.dumps({"pids": [audio_proc.pid, sacn_proc.pid]}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=1.0):
+                pass
+        except Exception:
+            pass
+
         audio_ready, sacn_ready = threading.Event(), threading.Event()
         for name, proc, ev in (("audio", audio_proc, audio_ready), ("sacn", sacn_proc, sacn_ready)):
             threading.Thread(target=_pump_output, args=(proc, name, ev), daemon=True).start()
 
-        # Phase 1: both workers do ALL slow setup (imports, file decode, FM carrier, mixer load)
-        # and report READY. T0 is only chosen afterwards, so a slow start can never put the
-        # lights and audio out of step.
+        # Phase 1: Wait for READY signals
         _wait_until_ready([("audio", audio_proc, audio_ready), ("sacn", sacn_proc, sacn_ready)],
                           ready_timeout_s)
 
-        # Phase 2: hand both workers the same start instant on the shared monotonic clock.
+        # Phase 2: Send T0 clock lock
         t0 = time.monotonic() + lead_time_s
         print(f"[SYNC] Both workers ready. T0 Clock Lock Engaged: starting in {lead_time_s:.2f}s.")
         trigger_msg = f"{t0!r}\n"
@@ -439,25 +459,26 @@ def run_track(track_idx, playlist, telemetry=None):
             proc.stdin.write(trigger_msg)
             proc.stdin.flush()
 
-        # Phase 3: wait for BOTH to finish. The audio process can exit well before the sound
-        # has actually played out (FM pipe/buffers), and lights may be held on purpose
-        # (button_hold_s), so never cut the lights off just because audio returned first.
+        # Phase 3: Wait for completion or early abort signal
         first_exit = None
-        # The lights are *meant* to outlast the audio by button_hold_s, so the hang guard has to
-        # allow for it, or a long hold gets the transmitter killed mid-hold.
-        end_grace_s += float(button_hold)
+        # Hang guard: a worker still running after the other exited is only killed once it is past the
+        # time the track should have taken (longest of audio/sequence + button hold) plus a grace period,
+        # so lights can't be cut off just because the audio side stopped early (e.g. no sound device).
+        expected_s = max([x for x in (audio_s, seq_s) if x] or [0.0])
+        hard_deadline = t0 + expected_s + float(button_hold) + end_grace_s
         while True:
             audio_done = audio_proc.poll() is not None
             sacn_done = sacn_proc.poll() is not None
             if audio_done and sacn_done:
                 break
             if audio_done or sacn_done:
+                now = time.monotonic()
                 if first_exit is None:
-                    first_exit = time.monotonic()
-                elif time.monotonic() - first_exit > end_grace_s:
+                    first_exit = now
+                if now > max(hard_deadline, first_exit + end_grace_s):
                     laggard = "sacn" if audio_done else "audio"
-                    print(f"[WARN] {laggard} worker still running {end_grace_s:.0f}s after the other "
-                          f"finished; terminating it.", file=sys.stderr)
+                    print(f"[WARN] {laggard} worker still running well past the expected end of the track; "
+                          f"terminating it.", file=sys.stderr)
                     break
             time.sleep(0.05)
 
@@ -483,19 +504,21 @@ def run_track(track_idx, playlist, telemetry=None):
                     proc.kill()
         active_processes = []
 
-    # Inter-track 3-second blackout head
-    inter_track_delay = current_track.get("post_delay_s", 3.0)
-    print("[SHOW] Holding inter-track blackout head on FM...")
-    if telemetry:
-        telemetry.set_show_state("BLACKOUT")
+    # Check if a macro killed us during the track
+    if is_terminating or is_panicked:
+        return False
 
-    normal_priority = sys_config.get("network", {}).get("priority_normal", 100)
-    send_sacn_blackout(universe=universe, priority=normal_priority)
-    time.sleep(inter_track_delay)
+    # Inter-track delay
+    try:
+        inter_track_delay = current_track.get("post_delay_s", 3.0)
+        print("[SHOW] Holding inter-track blackout head...", flush=True)
+        time.sleep(inter_track_delay)
+    except Exception as e:
+        print(f"[WARN] Non-fatal error during inter-track delay: {e}", file=sys.stderr)
 
-    return True
+    return True  # Proceed to track idx + 1
 
-def graceful_shutdown(telemetry=None):
+def graceful_shutdown():
     """Clean, non-emergency shutdown for normal show completion."""
     global fm_carrier_proc, sys_config
     print("\n[SHOW] Performing graceful show completion and blackout...")
@@ -510,10 +533,6 @@ def graceful_shutdown(telemetry=None):
     if fm_carrier_proc and fm_carrier_proc.poll() is None:
         fm_carrier_proc.terminate()
 
-    if telemetry:
-        telemetry.set_show_state("COMPLETED")
-        telemetry.stop()
-
     print("[SHOW] Show engine stopped cleanly. Exiting with status 0.")
 
 # ==============================================================================
@@ -525,39 +544,35 @@ def main():
     args = parse_args()
 
     # Register OS Signal Handlers
-    signal.signal(signal.SIGINT, emergency_panic_latch)   # Ctrl+C
-    signal.signal(signal.SIGTERM, emergency_panic_latch)  # systemd stop / kill
+    signal.signal(signal.SIGINT, cleanup_and_exit)   # Ctrl+C
+    signal.signal(signal.SIGTERM, cleanup_and_exit)  # systemd stop / kill
 
     # Load Central Configs
-    sys_config, playlist = load_system_configs(args.config)
+    sys_config, playlist = load_system_configs(args)
 
     print("==================================================")
-    print(f"  {sys_config.get('show_name', 'RESIDENTIAL LIGHT SHOW DAEMON')}  ")
+    print(f"   {sys_config.get('show_name', 'RESIDENTIAL LIGHT SHOW DAEMON')}   ")
     print("==================================================")
     print(f"[INIT] Loaded system configuration from: {os.path.abspath(args.config)}")
     print(f"[INIT] Playlist contains {len(playlist)} tracks.")
 
-    telemetry = ShowTelemetry()
-
     # Initialize persistent broadcast carrier
-    init_persistent_fm_carrier(telemetry)
+    init_persistent_fm_carrier()
 
     show_failed = False
 
     try:
-        telemetry.set_show_state("RUNNING")
-        
         for idx in range(len(playlist)):
+            print(f"\n[SHOW CONTROL] Starting track index {idx} of {len(playlist)}...", flush=True)
             if is_panicked:
                 show_failed = True
                 break
-            success = run_track(idx, playlist, telemetry)
+            success = run_track(idx, playlist)      
             if not success:
-                print(f"[WARN] Track index {idx} failed. Terminating show execution.")
-                show_failed = True
+                print(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.", file=sys.stderr, flush=True)
                 break
-
-        print("\n[SHOW] Playlist execution finished.")
+        else:
+            print("[SHOW CONTROL] Completed all tracks in playlist successfully.", flush=True)            
 
     except Exception as e:
         print(f"[ERROR] Unexpected exception in main show loop: {e}")
@@ -567,7 +582,7 @@ def main():
         emergency_panic_latch()
     else:
         print("\n[SHOW] Playlist execution finished successfully.")
-        graceful_shutdown(telemetry)
+        graceful_shutdown()
         sys.exit(0)
 
 if __name__ == "__main__":

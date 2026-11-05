@@ -1,0 +1,155 @@
+import os
+import sys
+import time
+import json
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+
+# --- PATHS & CONFIGURATION ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+MAIN_CONFIG_PATH = BASE_DIR / "config" / "main_config.json"
+INIT_NODE_URL = "http://127.0.0.1:5001"
+
+
+def query_initializer_api(endpoint: str, payload: dict) -> bool:
+    """Sends POST command payloads to the Initializer Node IPC server."""
+    url = f"{INIT_NODE_URL}{endpoint}"
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            return resp.status == 200
+    except Exception as e:
+        print(f"[SCHEDULER] [ERROR] Failed to send IPC command to {endpoint}: {e}", file=sys.stderr)
+        return False
+
+
+def get_system_status() -> dict:
+    """Queries Initializer Node for system state."""
+    url = f"{INIT_NODE_URL}/api/status"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+
+
+class SchedulerNode:
+    def __init__(self, main_config_path: Path):
+        self.main_config_path = main_config_path
+        self.main_config = self._load_json(self.main_config_path)
+
+        # Force lookup of config/schedule.json
+        self.schedule_path = BASE_DIR / "config" / "schedule.json"
+        paths_cfg = self.main_config.get("system", {}).get("paths", {})
+        if "schedule_config" in paths_cfg:
+            self.schedule_path = BASE_DIR / paths_cfg["schedule_config"]
+
+        self.running = True
+        self.last_triggered_event = None
+
+    def _load_json(self, path: Path) -> dict:
+        if path.exists():
+            try:
+                with open(path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[SCHEDULER] [WARN] Failed to read {path}: {e}", file=sys.stderr)
+        else:
+            print(f"[SCHEDULER] [WARN] File not found: {path}", file=sys.stderr)
+        return {}
+
+    def run(self):
+        show_name = self.main_config.get("system", {}).get("show_name", "Holiday Lightshow")
+
+        print("==================================================", flush=True)
+        print(f"   {show_name.upper()} - SCHEDULER DAEMON   ", flush=True)
+        print("==================================================", flush=True)
+        print(f"[SCHEDULER] Main config: {self.main_config_path}", flush=True)
+        print(f"[SCHEDULER] Schedule matrix source: {self.schedule_path}", flush=True)
+        print(f"[SCHEDULER] API Target: {INIT_NODE_URL}", flush=True)
+
+        while self.running:
+            try:
+                now = datetime.now()
+                day_name = now.strftime("%A").lower()  # e.g. "wednesday"
+                time_key = now.strftime("%H%M")         # e.g. "2003"
+                event_id = f"{day_name}_{time_key}"
+
+                # Automatically clear latch if minute has changed
+                if self.last_triggered_event and not self.last_triggered_event.endswith(time_key):
+                    self.last_triggered_event = None
+
+                # Query Initializer status
+                status = get_system_status()
+                current_state = status.get("system_state", "UNKNOWN")
+
+                # Do not execute scheduled items during emergency PANIC
+                if current_state == "PANIC":
+                    time.sleep(5.0)
+                    continue
+
+                # Load latest schedule matrix
+                schedule_data = self._load_json(self.schedule_path)
+                day_schedule = schedule_data.get("schedule", {}).get(day_name, {})
+
+                # Check if current minute key exists in schedule
+                if time_key in day_schedule:
+                    action_target = str(day_schedule[time_key]).strip()
+
+                    if self.last_triggered_event != event_id:
+                        print(f"\n[SCHEDULER] Match found! [{day_name.upper()} {time_key}] -> Target: '{action_target}'", flush=True)
+
+                        success = False
+                        if action_target.upper() in ("ON", "ALL_ON"):
+                            success = query_initializer_api("/api/macro", {"action": "ON"})
+                        elif action_target.upper() in ("OFF", "BLACKOUT"):
+                            success = query_initializer_api("/api/macro", {"action": "OFF"})
+                        elif action_target.upper() == "PANIC":
+                            success = query_initializer_api("/api/macro", {"action": "PANIC"})
+                        else:
+                            # Treat any other string as a playlist name.
+                            # /api/show/start kills whatever is running before starting, so never fire it
+                            # while a show is in progress: that would restart the show mid-song. (It also
+                            # makes a retry safe if an earlier request timed out after the show had started.)
+                            if current_state == "SHOW_RUNNING":
+                                now_playing = status.get("now_playing") or "unknown track"
+                                print(f"[SCHEDULER] Skipping '{action_target}' for {event_id}: a show is already "
+                                      f"running (now playing: {now_playing}).", flush=True)
+                                self.last_triggered_event = event_id
+                                time.sleep(5.0)
+                                continue
+                            success = query_initializer_api("/api/show/start", {"playlist": action_target})
+
+                        if success:
+                            self.last_triggered_event = event_id
+                            print(f"[SCHEDULER] Command successfully dispatched for {event_id}.", flush=True)
+
+            except Exception as e:
+                print(f"[SCHEDULER] Exception in main loop: {e}", file=sys.stderr)
+
+            # Sleep 5 seconds to ensure we hit the 1-minute window reliably
+            time.sleep(5.0)
+
+    def stop(self):
+        self.running = False
+
+
+def main():
+    scheduler = SchedulerNode(MAIN_CONFIG_PATH)
+    try:
+        scheduler.run()
+    except (KeyboardInterrupt, SystemExit):
+        print("\n[SCHEDULER] Scheduler shutting down cleanly.")
+
+
+if __name__ == "__main__":
+    main()

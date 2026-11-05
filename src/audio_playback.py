@@ -16,6 +16,7 @@ import sys
 import os
 import argparse
 import signal
+import stat
 import subprocess
 import time
 
@@ -42,6 +43,11 @@ def parse_args():
         "-s", "--speakers",
         action="store_true",
         help="Enable local speaker playback concurrently with FM broadcast"
+    )
+    parser.add_argument(
+        "--no-fm",
+        action="store_true",
+        help="Disable FM entirely (no sox/pi_fm_rds); play through the local speakers only"
     )
     parser.add_argument(
         "--ps-name",
@@ -94,16 +100,25 @@ def audio_duration_s(path):
         return None
 
 
-def report_fm_timing(duration, started, finished):
+def report_fm_timing(duration, started, finished, sox_returncode=0):
     """sox can only finish once the FM modulator has consumed (almost) all the audio, so how long
     it took tells us how fast the FM chain really plays the stream compared with the wall clock."""
+    if sox_returncode:
+        print(f"[ERROR] sox exited with code {sox_returncode}; the audio did not play correctly.", flush=True)
     if not duration:
         return
     elapsed = finished - started
     pipe_s = 65536 / 44100.0  # default Linux pipe (64 KiB) holds ~1.5 s of 22050 Hz mono s16 audio
-    ratio = (duration - pipe_s) / elapsed if elapsed > 0 else 0
+    expected = max(duration - pipe_s, 0.1)
+    ratio = expected / elapsed if elapsed > 0 else float("inf")
+    if ratio > 1.5 or ratio < 0.67:
+        print(f"[TIMING] ERROR: sox took {elapsed:.2f}s to feed a {duration:.2f}s file to the FM chain "
+              f"(expected ~{expected:.2f}s). Nothing was reading the stream at real-time speed, so the audio "
+              f"was almost certainly NOT broadcast. Check that the FM carrier is running and that "
+              f"{FIFO_PATH} is a FIFO (`ls -l {FIFO_PATH}` should start with 'p').", flush=True)
+        return
     print(f"[TIMING] file length {duration:.2f}s; FM chain took {elapsed:.2f}s to accept it "
-          f"(expect ~{duration - pipe_s:.2f}s). Playback speed vs real time: {ratio:.4f}x", flush=True)
+          f"(expect ~{expected:.2f}s). Playback speed vs real time: {ratio:.4f}x", flush=True)
     if abs(ratio - 1.0) > 0.003:
         print(f"[TIMING] WARNING: FM audio is {'FASTER' if ratio > 1 else 'SLOWER'} than real time by "
               f"{abs(ratio - 1) * 100:.2f}% (~{abs(duration * (1 - 1 / ratio)):.1f}s over this track). "
@@ -139,12 +154,41 @@ def _raise_interrupt(*_):
     raise KeyboardInterrupt
 
 
+def play_linux_speakers_only(abs_audio_path, speaker_offset):
+    """FM disabled (e.g. dev VM): just play through the local sound device, still starting at T0."""
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+    proc = None
+    try:
+        print("[INFO] FM disabled: playing through local speakers only.")
+        t0 = signal_ready_and_get_t0()
+        sleep_until(t0 + speaker_offset)
+        try:
+            proc = subprocess.Popen(["play", "-q", abs_audio_path], stdout=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print("[WARN] 'play' (from the sox package) is not installed; no audio will be played.",
+                  file=sys.stderr)
+            return
+        rc = proc.wait()
+        if rc:
+            print(f"[WARN] play exited with code {rc} (no sound device?); audio did not play.", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\n[WARN] Playback interrupted. Stopping speaker playback...")
+    finally:
+        if proc and proc.poll() is None:
+            proc.terminate()
+
+
 def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_offset):
     signal.signal(signal.SIGTERM, _raise_interrupt)  # let `finally` reap sox/play/pi_fm_rds
     processes = []
     try:
         fm_proc = None
         if os.path.exists(FIFO_PATH):
+            if not stat.S_ISFIFO(os.stat(FIFO_PATH).st_mode):
+                print(f"[ERROR] {FIFO_PATH} exists but is NOT a named pipe (FIFO). sox would just write the "
+                      f"audio into a plain file and nothing would be broadcast. Remove it "
+                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.", file=sys.stderr)
+                sys.exit(1)
             print(f"[INFO] Streaming to active FM carrier pipe ({FIFO_PATH})...")
             sink = FIFO_PATH
         else:
@@ -192,7 +236,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_o
 
         # Wait for everything to finish.
         sox_proc.wait()
-        report_fm_timing(duration, sox_started, time.monotonic())
+        report_fm_timing(duration, sox_started, time.monotonic(), sox_proc.returncode)
         if fm_proc:
             fm_proc.wait()
         if speaker_proc:
@@ -207,7 +251,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_o
                 proc.terminate()
 
 
-def play_audio(audio_file, freq, enable_speakers, ps_name, offset, speaker_offset):
+def play_audio(audio_file, freq, enable_speakers, ps_name, offset, speaker_offset, no_fm=False):
     abs_audio_path = os.path.abspath(audio_file)
     if not os.path.isfile(abs_audio_path):
         print(f"[ERROR] Audio file not found: {abs_audio_path}", file=sys.stderr)
@@ -221,6 +265,8 @@ def play_audio(audio_file, freq, enable_speakers, ps_name, offset, speaker_offse
 
     if os.name == 'nt':
         play_windows(abs_audio_path, offset)
+    elif no_fm:
+        play_linux_speakers_only(abs_audio_path, speaker_offset)
     else:
         play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_offset)
 
@@ -235,6 +281,7 @@ def main():
         ps_name=args.ps_name,
         offset=args.offset,
         speaker_offset=args.speaker_offset,
+        no_fm=args.no_fm,
     )
 
 
