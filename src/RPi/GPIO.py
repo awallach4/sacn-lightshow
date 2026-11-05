@@ -32,7 +32,7 @@ def setup(pin, mode, initial=HIGH if ACTIVE_LOW else LOW):
         "is_on": is_on,
         "raw_level": 100.0 if is_on else 0.0
     }
-    render_initial_table()
+#    render_initial_table()
 
 def output(pin, state):
     if pin in _pins:
@@ -45,7 +45,7 @@ def output(pin, state):
 
         _pins[pin]["is_on"] = is_on
         _pins[pin]["raw_level"] = raw_percent
-        _render_console()
+#        _render_console()
 
 class PWM:
     def __init__(self, pin, frequency):
@@ -62,19 +62,19 @@ class PWM:
             is_on = self.duty_cycle >= NON_DIM_THRESHOLD
             _pins[self.pin]["is_on"] = is_on
             _pins[self.pin]["raw_level"] = self.duty_cycle
-        _render_console()
+#        _render_console()
 
     def stop(self):
         self.duty_cycle = 0.0
         if self.pin in _pins:
             _pins[self.pin]["is_on"] = False
             _pins[self.pin]["raw_level"] = 0.0
-        _render_console()
+#        _render_console()
 
 def render_initial_table():
     global _initialized
     _initialized = True
-    _render_console(first_run=True)
+#    _render_console(first_run=True)
 
 def cleanup():
     _pins.clear()

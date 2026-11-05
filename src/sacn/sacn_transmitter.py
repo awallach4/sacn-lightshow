@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import json
 import signal
 import struct
 import sys
@@ -23,9 +24,17 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from logger_setup import get_node_logger, setup_global_exception_handler
+
 # Printed on stdout once decoding/network setup is finished, so the show
 # controller knows it can safely hand out the shared T0 start time.
 READY_TOKEN = "@@READY@@"
+CONFIG_FILE = Path("config/main_config.json")
 
 
 @dataclass(frozen=True)
@@ -39,6 +48,18 @@ class FseqInfo:
     blocks: tuple[tuple[int, int], ...] = ()  # (first_frame, compressed_size)
     ranges: tuple[tuple[int, int], ...] = ()  # (zero-based start, channel length)
 
+def load_log_level() -> str:
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("log_level", "INFO")
+    except Exception:
+        pass
+    return "INFO"
+
+# Initialize node logger
+log = get_node_logger("sacn_transmitter", load_log_level())
+setup_global_exception_handler(log)
 
 def _u24le(data: bytes) -> int:
     return int.from_bytes(data, "little")
@@ -258,9 +279,9 @@ def play(args: argparse.Namespace) -> None:
     sender_fps = min(120, max(30, 2 * round(1000 / info.step_ms)))
     sender = sacn.sACNsender(source_name=args.source_name, fps=sender_fps)
     active_universes: set[int] = set()
-    print(f"FSEQ v{info.version}: {total} frames, {info.channel_count} packed channels, "
+    log.info(f"FSEQ v{info.version}: {total} frames, {info.channel_count} packed channels, "
           f"{info.step_ms} ms/frame; sparse ranges: {info.ranges}")
-    print(f"Starting universe: {args.universe}; playback speed: {args.speed:g}x")
+    log.info(f"Starting universe: {args.universe}; playback speed: {args.speed:g}x")
 
     def activate(universe: int) -> None:
         sender.activate_output(universe)
@@ -309,16 +330,15 @@ def play(args: argparse.Namespace) -> None:
                 sleep_until(base + index * frame_period)  # holds the final frame for a full period
 
             if not args.loop:
-                print(f"Sequence finished {time.perf_counter() - (base):.3f}s after T0 "
-                      f"(expected {total * frame_period:.3f}s; {total} frames x {info.step_ms} ms / {args.speed:g}).",
-                      flush=True)
+                log.info(f"Sequence finished {time.perf_counter() - (base):.3f}s after T0 "
+                      f"(expected {total * frame_period:.3f}s; {total} frames x {info.step_ms} ms / {args.speed:g}).")
                 time.sleep(args.button_hold)  # optional extra hold of the last cue
                 break
             base += total * frame_period
 
     finally:
         if skipped:
-            print(f"Warning: skipped {skipped} frame(s) to stay in sync with the clock.", file=sys.stderr)
+            log.warning(f"Skipped {skipped} frame(s) to stay in sync with the clock.", sys.stderr)
         try:
             # Blackout: push zeros first, then send stream-terminated packets.
             for universe in active_universes:
@@ -353,7 +373,7 @@ def main() -> int:
     try:
         play(args)
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        log.error(f"Error: {exc}", sys.stderr)
         return 1
     except KeyboardInterrupt:
         pass

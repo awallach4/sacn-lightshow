@@ -1,13 +1,34 @@
 import sys
+from pathlib import Path
 
+
+IMPORT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(IMPORT_ROOT))
+
+from logger_setup import get_node_logger
+
+CONFIG_FILE = "config/main_config.json"
+def load_log_level() -> str:
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("log_level", "INFO")
+    except Exception:
+        pass
+    return "INFO"
+
+# Initialize node logger
+log = get_node_logger("web", load_log_level())
 
 def _fatal_import(exc):
     """Explain a missing/broken dependency in terms of the exact interpreter that failed."""
-    print(f"[Flask] FATAL: could not import a required package: {exc}", file=sys.stderr, flush=True)
-    print(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})", file=sys.stderr, flush=True)
-    print(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt", file=sys.stderr, flush=True)
-    print("[Flask]   (Ubuntu 23.04+ blocks system-wide pip installs: use a venv, and start main.py with that "
-          "venv's python, also under sudo.)", file=sys.stderr, flush=True)
+    log.error(f"[Flask] FATAL: could not import a required package: {exc}", sys.stderr)
+    log.error(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})", sys.stderr)
+    log.error(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt", sys.stderr)
+    log.error("[Flask]   (Ubuntu 23.04+ blocks system-wide pip installs: use a venv, and start main.py with that "
+          "venv's python, also under sudo.)", sys.stderr)
     sys.exit(1)
 
 
@@ -25,7 +46,6 @@ import json
 import time
 import platform
 import subprocess
-from pathlib import Path
 import urllib.request
 import urllib.error
 
@@ -63,6 +83,7 @@ INIT_NODE_URL = "http://127.0.0.1:5001"
 # routes below, so SPA deep links (e.g. /playlist) 404 and /api typos return HTML instead of JSON.
 app = Flask(__name__, static_folder=None)
 CORS(app)  # Allows Vite dev server (http://localhost:5173) to query API directly
+app.config['MAX_CONTENT_LENGTH'] = 150 * 1024 * 1024
 
 def get_cpu_temp() -> float:
     """Cross-platform CPU temperature reader."""
@@ -300,28 +321,43 @@ def get_json_config(config_type):
     except Exception as e:
         return jsonify({"error": f"Failed to read {config_type}.json: {str(e)}"}), 500
 
-
 @app.route("/api/config/<config_type>", methods=["POST"])
 def save_json_config(config_type):
     """Saves raw text content back to the specified JSON configuration file after syntax validation."""
     if config_type not in CONFIG_FILES:
         return jsonify({"error": f"Invalid configuration type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
 
-    payload = request.get_json() or {}
-    raw_content = payload.get("content", "")
+    payload = request.get_json(silent=True) or {}
+    raw_content = payload.get("content")
+
+    if raw_content is None:
+        return jsonify({ "error": "Missing 'content' field in request body." }), 400
 
     # Validate JSON syntax before overwriting
     try:
-        parsed_data = json.loads(raw_content)
+        if isinstance(raw_content, str):
+            parsed_data = json.loads(raw_content)
+        elif isinstance(raw_content, (dict, list)):
+            parsed_data = raw_content
+        else:
+            return jsonify({ "error": "Content must be a JSON string or valid object/array."}), 400
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON syntax: {str(e)}"}), 400
 
     target_file = CONFIG_FILES[config_type]
+    temp_file = target_file.with_name(".json.tmp")
+
     try:
-        with open(target_file, "w", encoding="utf-8") as f:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(parsed_data, f, indent=2)
+
+        os.replace(temp_file, target_file)
+
         return jsonify({"status": "success", "message": f"{config_type}.json saved successfully"}), 200
     except Exception as e:
+        if temp_file.exists():
+            temp_file.unlink(missing_ok=True)
         return jsonify({"error": f"Failed to write {config_type}.json: {str(e)}"}), 500
 
 # -------------------------------------------------------------------
@@ -367,7 +403,11 @@ def upload_show_files():
             "audio": audio_name,
             "sequence": lights_name,
             "button_hold_s": 1.5,
-            "post_delay_s": 3.0
+            "post_delay_s": 3.0,
+            "audio_offset_s": 0.0,
+            "speaker_offset_s": 0.0,
+            "light_speed": 1.0,
+            "rds": Path(audio_name).stem.replace("_", "").title()
         }
 
         # Update entries in selected playlists
@@ -407,7 +447,7 @@ def upload_show_files():
 ###############################################################################
 
 # Initialize sACN Sender Node
-sacn_sender = sacn.sACNsender(fps=30)
+sacn_sender = sacn.sACNsender(source_name="Web Console" , fps=30)
 sacn_sender.start()
 
 # Active universe registration tracking
@@ -442,7 +482,7 @@ def _console_idle_watchdog():
     while True:
         gevent.sleep(5.0)
         if active_universes and time.monotonic() - last_console_frame > CONSOLE_IDLE_RELEASE_S:
-            print(f"[Flask] Console idle for {CONSOLE_IDLE_RELEASE_S:.0f}s; releasing universes {sorted(active_universes)}.", flush=True)
+            log.info(f"[Flask] Console idle for {CONSOLE_IDLE_RELEASE_S:.0f}s; releasing universes {sorted(active_universes)}.")
             release_console_outputs()
 
 
@@ -493,6 +533,6 @@ def sacn_stream_handler():
     return jsonify({"status": "transmitting", "priority": priority, "universes": list(universe_buffers.keys())}), 200
 
 if __name__ == "__main__":
-    print("[Flask] Starting gevent WSGI server on port 5000...", flush=True)
+    log.info("[Flask] Starting gevent WSGI server on port 5000...")
     http_server = WSGIServer(("0.0.0.0", 5000), app, handler_class=WebSocketHandler)
     http_server.serve_forever()

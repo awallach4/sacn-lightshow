@@ -12,6 +12,8 @@ Sync protocol (with show_control.py):
   4. Audio is started at T0 + offset, on every platform.
 """
 
+import json
+from pathlib import Path
 import sys
 import os
 import argparse
@@ -20,9 +22,24 @@ import stat
 import subprocess
 import time
 
+from logger_setup import get_node_logger, setup_global_exception_handler
+
 READY_TOKEN = "@@READY@@"
 FIFO_PATH = "/tmp/fm_audio.fifo"
+CONFIG_FILE = Path("config/main_config.json")
 
+def load_log_level() -> str:
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("log_level", "INFO")
+    except Exception:
+        pass
+    return "INFO"
+
+# Initialize node logger
+log = get_node_logger("audio", load_log_level())
+setup_global_exception_handler(log)
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -56,6 +73,11 @@ def parse_args():
         help="RDS Program Service station name (max 8 chars, default: HOLIDAY)"
     )
     parser.add_argument(
+        "--rds-text",
+        type=str,
+        help="RDS description text (max 64 chars)"
+    )
+    parser.add_argument(
         "--offset",
         type=float,
         default=0.0,
@@ -73,11 +95,11 @@ def parse_args():
 
 def validate_environment(audio_file, freq):
     if not os.path.isfile(audio_file):
-        print(f"[ERROR] Audio file not found: {audio_file}", file=sys.stderr)
+        log.error(f"[AUDIO] Audio file not found: {audio_file}", sys.stderr)
         sys.exit(1)
 
     if not (87.5 <= freq <= 108.0):
-        print(f"[ERROR] Frequency {freq} MHz is outside the standard FM broadcast band (87.5 - 108.0 MHz)", file=sys.stderr)
+        log.error(f"[AUDIO] Frequency {freq} MHz is outside the standard FM broadcast band (87.5 - 108.0 MHz)", sys.stderr)
         sys.exit(1)
 
 
@@ -104,7 +126,7 @@ def report_fm_timing(duration, started, finished, sox_returncode=0):
     """sox can only finish once the FM modulator has consumed (almost) all the audio, so how long
     it took tells us how fast the FM chain really plays the stream compared with the wall clock."""
     if sox_returncode:
-        print(f"[ERROR] sox exited with code {sox_returncode}; the audio did not play correctly.", flush=True)
+        log.error(f"[AUDIO] sox exited with code {sox_returncode}; the audio did not play correctly.")
     if not duration:
         return
     elapsed = finished - started
@@ -112,17 +134,17 @@ def report_fm_timing(duration, started, finished, sox_returncode=0):
     expected = max(duration - pipe_s, 0.1)
     ratio = expected / elapsed if elapsed > 0 else float("inf")
     if ratio > 1.5 or ratio < 0.67:
-        print(f"[TIMING] ERROR: sox took {elapsed:.2f}s to feed a {duration:.2f}s file to the FM chain "
+        log.error(f"[TIMING] sox took {elapsed:.2f}s to feed a {duration:.2f}s file to the FM chain "
               f"(expected ~{expected:.2f}s). Nothing was reading the stream at real-time speed, so the audio "
               f"was almost certainly NOT broadcast. Check that the FM carrier is running and that "
-              f"{FIFO_PATH} is a FIFO (`ls -l {FIFO_PATH}` should start with 'p').", flush=True)
+              f"{FIFO_PATH} is a FIFO (`ls -l {FIFO_PATH}` should start with 'p').")
         return
-    print(f"[TIMING] file length {duration:.2f}s; FM chain took {elapsed:.2f}s to accept it "
-          f"(expect ~{expected:.2f}s). Playback speed vs real time: {ratio:.4f}x", flush=True)
+    log.debug(f"[TIMING] file length {duration:.2f}s; FM chain took {elapsed:.2f}s to accept it "
+          f"(expect ~{expected:.2f}s). Playback speed vs real time: {ratio:.4f}x")
     if abs(ratio - 1.0) > 0.003:
-        print(f"[TIMING] WARNING: FM audio is {'FASTER' if ratio > 1 else 'SLOWER'} than real time by "
+        log.warning(f"[TIMING] FM audio is {'FASTER' if ratio > 1 else 'SLOWER'} than real time by "
               f"{abs(ratio - 1) * 100:.2f}% (~{abs(duration * (1 - 1 / ratio)):.1f}s over this track). "
-              f"Lights will drift against it; set system.sync.light_speed to ~{ratio:.4f}.", flush=True)
+              f"Lights will drift against it; set system.sync.light_speed to ~{ratio:.4f}.")
 
 
 def signal_ready_and_get_t0():
@@ -135,7 +157,7 @@ def signal_ready_and_get_t0():
 def play_windows(abs_audio_path, offset):
     import pygame  # only needed here, so the Pi doesn't require pygame
 
-    print("[INFO] Windows detected: Skipping pi_fm_rds RF hardware generation.")
+    log.info("[AUDIO] Windows detected: Skipping pi_fm_rds RF hardware generation.")
     os.environ['SDL_AUDIODRIVER'] = 'directsound'
     pygame.mixer.pre_init(44100, -16, 2, 512)
     pygame.mixer.init()
@@ -159,44 +181,44 @@ def play_linux_speakers_only(abs_audio_path, speaker_offset):
     signal.signal(signal.SIGTERM, _raise_interrupt)
     proc = None
     try:
-        print("[INFO] FM disabled: playing through local speakers only.")
+        log.info("[AUDIO] FM disabled: playing through local speakers only.")
         t0 = signal_ready_and_get_t0()
         sleep_until(t0 + speaker_offset)
         try:
             proc = subprocess.Popen(["play", "-q", abs_audio_path], stdout=subprocess.DEVNULL)
         except FileNotFoundError:
-            print("[WARN] 'play' (from the sox package) is not installed; no audio will be played.",
-                  file=sys.stderr)
+            log.warning("[AUDIO] 'play' (from the sox package) is not installed; no audio will be played.",
+                  sys.stderr)
             return
         rc = proc.wait()
         if rc:
-            print(f"[WARN] play exited with code {rc} (no sound device?); audio did not play.", file=sys.stderr)
+            log.warning(f"[AUDIO] play exited with code {rc} (no sound device?); audio did not play.", sys.stderr)
     except KeyboardInterrupt:
-        print("\n[WARN] Playback interrupted. Stopping speaker playback...")
+        log.warning("\n[AUDIO] Playback interrupted. Stopping speaker playback...")
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
 
 
-def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_offset):
+def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset):
     signal.signal(signal.SIGTERM, _raise_interrupt)  # let `finally` reap sox/play/pi_fm_rds
     processes = []
     try:
         fm_proc = None
         if os.path.exists(FIFO_PATH):
             if not stat.S_ISFIFO(os.stat(FIFO_PATH).st_mode):
-                print(f"[ERROR] {FIFO_PATH} exists but is NOT a named pipe (FIFO). sox would just write the "
+                log.error(f"[AUDIO] {FIFO_PATH} exists but is NOT a named pipe (FIFO). sox would just write the "
                       f"audio into a plain file and nothing would be broadcast. Remove it "
-                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.", file=sys.stderr)
+                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.", sys.stderr)
                 sys.exit(1)
-            print(f"[INFO] Streaming to active FM carrier pipe ({FIFO_PATH})...")
+            log.info(f"[AUDIO] Streaming to active FM carrier pipe ({FIFO_PATH})...")
             sink = FIFO_PATH
         else:
-            print(f"[WARN] No FIFO found.  Launching standalone transmitter instance on {freq:.1f} MHz...")
+            log.warning(f"[AUDIO] No FIFO found.  Launching standalone transmitter instance on {freq:.1f} MHz...")
             sink = "-"
             # Start the modulator NOW (it's slow to initialise); sox is attached to it at T0.
             fm_proc = subprocess.Popen(
-                ["pi_fm_rds", "-freq", f"{freq:.1f}", "-audio", "-", "-ps", ps_name],
+                ["pi_fm_rds", "-freq", f"{freq:.1f}", "-audio", "-", "-ps", ps_name, "-rt", rt_text],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             processes.append(fm_proc)
@@ -228,7 +250,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_o
                 processes.append(sox_proc)
                 if fm_proc:
                     fm_proc.stdin.close()  # so pi_fm_rds sees EOF when sox finishes
-                print(f"[INFO] Broadcasting started on {freq:.1f} MHz...")
+                log.info(f"[AUDIO] Broadcasting started on {freq:.1f} MHz...")
             else:
                 speaker_proc = subprocess.Popen(["play", "-q", abs_audio_path],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -241,34 +263,34 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_o
             fm_proc.wait()
         if speaker_proc:
             speaker_proc.wait()
-        print("[INFO] Playback and broadcast completed cleanly.")
+        log.info("[AUDIO] Playback and broadcast completed cleanly.")
 
     except KeyboardInterrupt:
-        print("\n[WARN] Playback interrupted by user. Terminating broadcast processes...")
+        log.warning("\n[AUDIO] Playback interrupted by user. Terminating broadcast processes...")
     finally:
         for proc in processes:
             if proc.poll() is None:
                 proc.terminate()
 
 
-def play_audio(audio_file, freq, enable_speakers, ps_name, offset, speaker_offset, no_fm=False):
+def play_audio(audio_file, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset, no_fm=False):
     abs_audio_path = os.path.abspath(audio_file)
     if not os.path.isfile(abs_audio_path):
-        print(f"[ERROR] Audio file not found: {abs_audio_path}", file=sys.stderr)
+        log.error(f"[AUDIO] Audio file not found: {abs_audio_path}", sys.stderr)
         sys.exit(1)
 
-    print(f"[INFO] Initializing Audio FM Node")
-    print(f"[INFO] File: {abs_audio_path}")
-    print(f"[INFO] Frequency: {freq:.1f} MHz")
-    print(f"[INFO] Speaker Monitoring: {'ENABLED' if enable_speakers else 'DISABLED'}")
-    print(f"[INFO] Start offset vs T0: FM {offset:+.3f}s, speakers {speaker_offset:+.3f}s", flush=True)
+    log.info(f"[AUDIO] Initializing Audio FM Node")
+    log.info(f"[AUDIO] File: {abs_audio_path}")
+    log.info(f"[AUDIO] Frequency: {freq:.1f} MHz")
+    log.info(f"[AUDIO] Speaker Monitoring: {'ENABLED' if enable_speakers else 'DISABLED'}")
+    log.info(f"[AUDIO] Start offset vs T0: FM {offset:+.3f}s, speakers {speaker_offset:+.3f}s")
 
     if os.name == 'nt':
         play_windows(abs_audio_path, offset)
     elif no_fm:
         play_linux_speakers_only(abs_audio_path, speaker_offset)
     else:
-        play_linux(abs_audio_path, freq, enable_speakers, ps_name, offset, speaker_offset)
+        play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset)
 
 
 def main():
@@ -279,6 +301,7 @@ def main():
         freq=args.freq,
         enable_speakers=args.speakers,
         ps_name=args.ps_name,
+        rt_text=args.rds_text,
         offset=args.offset,
         speaker_offset=args.speaker_offset,
         no_fm=args.no_fm,

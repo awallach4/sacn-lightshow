@@ -10,20 +10,36 @@ from pathlib import Path
 import sacn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_FILE = Path("config/main_config.json")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from logger_setup import get_node_logger, setup_global_exception_handler
+
+def load_log_level() -> str:
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("log_level", "INFO")
+    except Exception:
+        pass
+    return "INFO"
+
+# Initialize node logger
+log = get_node_logger("sacn_listener", load_log_level())
+setup_global_exception_handler(log)
 
 # Keep the project's existing GPIO/HAL import convention.
 if sys.platform == "win32":
     import RPi.GPIO as GPIO
-    print("[HAL] Running on Windows: Loaded local ANSI GPIO Emulator.")
+    log.info("[HAL] Running on Windows: Loaded local ANSI GPIO Emulator.")
 else:
     try:
         import RPi.GPIO as GPIO
-        print("[HAL] Running on Linux/Raspberry Pi: Loaded native RPi.GPIO driver.")
+        log.info("[HAL] Running on Linux/Raspberry Pi: Loaded native RPi.GPIO driver.")
     except ImportError:
         import RPi.GPIO as GPIO
-        print("[HAL] Linux host without native GPIO driver: Loaded local GPIO emulator fallback.")
+        log.info("[HAL] Linux host without native GPIO driver: Loaded local GPIO emulator fallback.")
 
 
 def read_patch(patch_arg: str) -> dict:
@@ -239,7 +255,7 @@ def main():
     @receiver.listen_on("availability")
     def availability_callback(universe, changed):
         if changed in ("timeout", "stream_terminated") and universe in drivers:
-            print(f"[sACN] Universe {universe} {changed}; setting its GPIO outputs off.")
+            log.info(f"[sACN] Universe {universe} {changed}; setting its GPIO outputs off.")
             set_universe_off(drivers[universe])
 
     try:
@@ -248,13 +264,13 @@ def main():
             receiver.join_multicast(universe)
             joined_universes.append(universe)
 
-        print("sACN GPIO listener active on patched universes:")
+        log.info("sACN GPIO listener active on patched universes:")
         for universe in sorted(patch_map):
             channels = patch_map[universe]
-            print(f"  Universe {universe}:")
+            log.info(f"  Universe {universe}:")
             for address, config in sorted(channels.items()):
                 mode = "NON-DIM" if config["nondim"] else "PWM"
-                print(
+                log.info(
                     f"    DMX {address:3d} -> BCM {config['pin']:2d} "
                     f"[{mode}] {config['device_label']}"
                 )
@@ -262,7 +278,7 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nShutting down sACN GPIO listener...")
+        log.info("\nShutting down sACN GPIO listener...")
     finally:
         try:
             for universe in joined_universes:
@@ -274,7 +290,7 @@ def main():
                     if driver["type"] == "pwm":
                         driver["driver"].stop()
             GPIO.cleanup()
-        print("sACN GPIO listener stopped.")
+        log.info("sACN GPIO listener stopped.")
 
 
 if __name__ == "__main__":

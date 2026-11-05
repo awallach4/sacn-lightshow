@@ -1,3 +1,4 @@
+from logging import Logger
 import os
 import sys
 import time
@@ -7,6 +8,8 @@ import threading
 import subprocess
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from logger_setup import get_node_logger
 
 # --- CONFIGURATION & PATHS ---
 CONFIG_PATH = Path("config/main_config.json")
@@ -47,9 +50,8 @@ def kill_tree(proc):
     except Exception:
         pass
 
-
 class InitializerNode:
-    def __init__(self, config_path: Path):
+    def __init__(self, config_path: Path, log: Logger):
         self.config_path = config_path
         self.config = self._load_config()
         self.current_state = State.OFF
@@ -73,6 +75,7 @@ class InitializerNode:
         self.macro_active = False
         self.monitor_thread = None
         self.http_server = None
+        self.log = log
 
     def _load_config(self) -> dict:
         if self.config_path.exists():
@@ -80,7 +83,7 @@ class InitializerNode:
                 with open(self.config_path, "r") as f:
                     return json.load(f)
             except Exception as e:
-                print(f"[INIT] [WARN] Failed to read {self.config_path}: {e}", file=sys.stderr)
+                self.log.warning(f"[INIT] Failed to read {self.config_path}: {e}", sys.stderr)
         
         # Fallback schema matching main_config.json structure
         return {
@@ -109,29 +112,29 @@ class InitializerNode:
     def start_core_nodes(self):
         sys_cfg = self.config.get("system", {})
         show_name = sys_cfg.get("show_name", "Holiday Lightshow")
-        print(f"==================================================", flush=True)
-        print(f"   {show_name.upper()} - INITIALIZER NODE   ", flush=True)
-        print(f"==================================================", flush=True)
-        print(f"[INIT] Loaded main configuration from: {self.config_path.resolve()}", flush=True)
+        self.log.info(f"==================================================")
+        self.log.info(f"   {show_name.upper()} - INITIALIZER NODE   ")
+        self.log.info(f"==================================================")
+        self.log.info(f"[INIT] Loaded main configuration from: {self.config_path.resolve()}")
 
         py_exe = sys.executable
 
         # 1. Web Backend & Frontend (src/web/app.py)
         web_script = "src/web/app.py"
         if os.path.exists(web_script):
-            print(f"[INIT] Launching Web Server ({web_script})...", flush=True)
+            self.log.info(f"[INIT] Launching Web Server ({web_script})...")
             self.processes["web_server"] = subprocess.Popen([py_exe, web_script])
 
         # 2. Scheduler Node (scheduler_node.py)
         sched_script = "src/scheduler.py"
         if os.path.exists(sched_script):
-            print(f"[INIT] Launching Scheduler Node ({sched_script})...", flush=True)
+            self.log.info(f"[INIT] Launching Scheduler Node ({sched_script})...")
             self.processes["scheduler"] = subprocess.Popen([py_exe, sched_script])
 
         # 3. sACN Listener Node (sacn_listener.py)
         listener_script = "src/sacn/sacn_listener.py"
         if os.path.exists(listener_script):
-            print(f"[INIT] Launching sACN Listener ({listener_script})...", flush=True)
+            self.log.info(f"[INIT] Launching sACN Listener ({listener_script})...")
             self.processes["sacn_listener"] = subprocess.Popen([py_exe, listener_script, "-p", "config/patch.json"])
 
         # Start Process Health Monitor
@@ -151,7 +154,7 @@ class InitializerNode:
             for name, script_path in script_map.items():
                 proc = self.processes[name]
                 if proc and proc.poll() is not None:
-                    print(f"[INIT] [WARN] Process '{name}' exited unexpectedly with code {proc.returncode}. Restarting...", flush=True)
+                    self.log.warning(f"[INIT] Process '{name}' exited unexpectedly with code {proc.returncode}. Restarting...")
                     if os.path.exists(script_path):
                         if name == "sacn_listener":
                             self.processes[name] = subprocess.Popen([py_exe, script_path, "-p", "config/patch.json"])
@@ -161,7 +164,7 @@ class InitializerNode:
             # Check if active show control completed naturally
             show_proc = self.processes["show_control"]
             if show_proc and show_proc.poll() is not None:
-                print(f"[INIT] Show Control process finished (code {show_proc.returncode}). Returning to OFF state.", flush=True)
+                self.log.info(f"[INIT] Show Control process finished (code {show_proc.returncode}). Returning to OFF state.")
                 self.processes["show_control"] = None
                 # Reap any leftovers and forget the PIDs: stale PIDs can be reused by unrelated
                 # processes, and stop_active_output() would SIGKILL them later.
@@ -188,7 +191,7 @@ class InitializerNode:
 
         if not patch_path.exists():
             fallback_universe = self.config.get("system", {}).get("network", {}).get("sacn_universe", 11)
-            print(f"[INIT] [WARN] Patch config not found at {patch_path}. Defaulting Universe {fallback_universe} to all 512 slots.", file=sys.stderr)
+            self.log.warning(f"[INIT] Patch config not found at {patch_path}. Defaulting Universe {fallback_universe} to all 512 slots.", sys.stderr)
             return {fallback_universe: [255] * 512}
 
         try:
@@ -217,7 +220,7 @@ class InitializerNode:
 
                 if patched_count > 0:
                     universe_frames[univ_id] = dmx_frame
-                    print(f"[INIT] Loaded patch for Universe {univ_id}: {patched_count} active channels.")
+                    self.log.info(f"[INIT] Loaded patch for Universe {univ_id}: {patched_count} active channels.")
 
             if not universe_frames:
                 fallback_universe = self.config.get("system", {}).get("network", {}).get("sacn_universe", 11)
@@ -227,7 +230,7 @@ class InitializerNode:
 
         except Exception as e:
             fallback_universe = self.config.get("system", {}).get("network", {}).get("sacn_universe", 11)
-            print(f"[INIT] [ERROR] Failed to parse {patch_path}: {e}. Defaulting Universe {fallback_universe} to all 512 slots.", file=sys.stderr)
+            self.log.error(f"[INIT] Failed to parse {patch_path}: {e}. Defaulting Universe {fallback_universe} to all 512 slots.", sys.stderr)
             return {fallback_universe: [255] * 512}
 
     def get_process_status(self) -> dict:
@@ -272,7 +275,7 @@ class InitializerNode:
 
         # 2. Kill show_control and its entire process group
         if show_proc and show_proc.poll() is None:
-            print("[INIT] Terminating active Show Control process tree...", flush=True)
+            self.log.info("[INIT] Terminating active Show Control process tree...")
             kill_tree(show_proc)  # show_control runs in its own session, so this reaches its workers too
                 
         self.processes["show_control"] = None
@@ -286,7 +289,7 @@ class InitializerNode:
         all_universe_frames = self._get_all_patched_universes()
         target_universes = list(all_universe_frames.keys())
 
-        print(f"[INIT] Releasing sACN Universes {target_universes} (Priority {priority}, Blackout)...", flush=True)
+        self.log.info(f"[INIT] Releasing sACN Universes {target_universes} (Priority {priority}, Blackout)...")
         try:
             import sacn
             sender = sacn.sACNsender(source_name="Initializer_Blackout")
@@ -307,9 +310,9 @@ class InitializerNode:
             sender.stop()
 
         except ImportError:
-            print("[INIT] [WARN] sACN package not installed. Skipping DMX blackout frame.", file=sys.stderr)
+            self.log.warning("[INIT] sACN package not installed. Skipping DMX blackout frame.", sys.stderr)
         except Exception as e:
-            print(f"[INIT] [ERROR] Failed to send blackout sACN: {e}", file=sys.stderr)
+            self.log.error(f"[INIT] Failed to send blackout sACN: {e}", sys.stderr)
 
     def trigger_all_on(self, level: int = 255):
         """Drives ONLY patched channels on ALL universes defined in patch.json to full level."""
@@ -339,7 +342,7 @@ class InitializerNode:
                     sender[u_id].dmx_data = frame
 
                 active_universes = list(all_universe_frames.keys())
-                print(f"[INIT] ALL ON macro active across Universes {active_universes} @ level {level}.", flush=True)
+                self.log.info(f"[INIT] ALL ON macro active across Universes {active_universes} @ level {level}.")
 
                 while self.macro_active and self.running:
                     time.sleep(0.5)
@@ -352,7 +355,7 @@ class InitializerNode:
                 sender.stop()
                 
             except Exception as err:
-                print(f"[INIT] All ON macro exception: {err}", file=sys.stderr)
+                self.log.error(f"[INIT] All ON macro exception: {err}", sys.stderr)
 
         self.macro_thread = threading.Thread(target=_on_loop, daemon=True)
         self.macro_thread.start()
@@ -366,12 +369,12 @@ class InitializerNode:
         py_exe = sys.executable
         cmd = [py_exe, "src/show_control.py", "--config", str(self.config_path), "--playlist", target_playlist]
         
-        print(f"[INIT] Starting show control with playlist '{target_playlist}'...", flush=True)
+        self.log.info(f"[INIT] Starting show control with playlist '{target_playlist}'...")
         self.processes["show_control"] = subprocess.Popen(cmd, start_new_session=True)
 
     def trigger_panic(self):
         """Immediately halts all processes, releases universes at panic priority, and flags PANIC state."""
-        print("[INIT] !!! PANIC TRIGGERED !!! Halting all show outputs.", flush=True)
+        self.log.warning("[INIT] !!! PANIC TRIGGERED !!! Halting all show outputs.")
         self.stop_active_output()
 
         panic_priority = self.config.get("system", {}).get("network", {}).get("priority_panic", 200)
@@ -382,11 +385,11 @@ class InitializerNode:
         """Executes system-level host operations."""
         self.cleanup()
         if action == "reboot":
-            print("[INIT] Executing system reboot...", flush=True)
+            self.log.info("[INIT] Executing system reboot...")
             if os.name != 'nt':
                 os.system("sudo reboot")
         elif action == "shutdown":
-            print("[INIT] Executing system shutdown...", flush=True)
+            self.log.info("[INIT] Executing system shutdown...")
             if os.name != 'nt':
                 os.system("sudo shutdown -h now")
 
@@ -396,18 +399,18 @@ class InitializerNode:
         if not self.running:
             return
         self.running = False
-        print("\n[INIT] Commencing graceful shutdown of Initializer Node...", flush=True)
+        self.log.info("\n[INIT] Commencing graceful shutdown of Initializer Node...")
 
         self.stop_active_output()
 
         # Terminate core child processes
         for name, proc in self.processes.items():
             if proc and proc.poll() is None:
-                print(f"[INIT] Stopping {name} (PID {proc.pid})...", flush=True)
+                self.log.info(f"[INIT] Stopping {name} (PID {proc.pid})...")
                 kill_tree(proc)
 
         self.release_all_universes()
-        print("[INIT] Teardown complete. All processes terminated and universes released.", flush=True)
+        self.log.info("[INIT] Teardown complete. All processes terminated and universes released.")
 
 
 # --- INTERNAL HTTP IPC SERVER ---
@@ -487,10 +490,21 @@ def make_ipc_handler(node: InitializerNode):
 
 
 def main():
-    node = InitializerNode(CONFIG_PATH)
+    def load_log_level() -> str:
+        try:
+            if CONFIG_PATH.exists():
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f).get("log_level", "INFO")
+        except Exception:
+            pass
+        return "INFO"
+    
+    log = get_node_logger("main", load_log_level())
+
+    node = InitializerNode(CONFIG_PATH, log)
 
     def _sig_handler(signum, frame):
-        print(f"\n[INIT] Received signal {signum}.", flush=True)
+        log.info(f"\n[INIT] Received signal {signum}.")
         node.cleanup()
         sys.exit(0)
 
@@ -504,7 +518,7 @@ def main():
     handler_cls = make_ipc_handler(node)
     httpd = QuietHTTPServer(("127.0.0.1", IPC_PORT), handler_cls)
     node.http_server = httpd
-    print(f"[INIT] IPC Command Server listening on http://127.0.0.1:{IPC_PORT}", flush=True)
+    log.info(f"[INIT] IPC Command Server listening on http://127.0.0.1:{IPC_PORT}")
 
     try:
         httpd.serve_forever()

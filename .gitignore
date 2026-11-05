@@ -22,3 +22,6 @@ config/
 
 # Temporary
 .tmp/
+
+# Logs
+logs/

@@ -1,3 +1,4 @@
+from logging import Logger
 import os
 import sys
 import time
@@ -7,13 +8,15 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
+from logger_setup import get_node_logger
+
 # --- PATHS & CONFIGURATION ---
 BASE_DIR = Path(__file__).resolve().parent.parent
 MAIN_CONFIG_PATH = BASE_DIR / "config" / "main_config.json"
 INIT_NODE_URL = "http://127.0.0.1:5001"
 
 
-def query_initializer_api(endpoint: str, payload: dict) -> bool:
+def query_initializer_api(endpoint: str, payload: dict, log: Logger) -> bool:
     """Sends POST command payloads to the Initializer Node IPC server."""
     url = f"{INIT_NODE_URL}{endpoint}"
     try:
@@ -27,7 +30,7 @@ def query_initializer_api(endpoint: str, payload: dict) -> bool:
         with urllib.request.urlopen(req, timeout=3.0) as resp:
             return resp.status == 200
     except Exception as e:
-        print(f"[SCHEDULER] [ERROR] Failed to send IPC command to {endpoint}: {e}", file=sys.stderr)
+        log.error(f"[SCHEDULER] Failed to send IPC command to {endpoint}: {e}", sys.stderr)
         return False
 
 
@@ -43,9 +46,10 @@ def get_system_status() -> dict:
 
 
 class SchedulerNode:
-    def __init__(self, main_config_path: Path):
+    def __init__(self, main_config_path: Path, log: Logger):
         self.main_config_path = main_config_path
         self.main_config = self._load_json(self.main_config_path)
+        self.log = log
 
         # Force lookup of config/schedule.json
         self.schedule_path = BASE_DIR / "config" / "schedule.json"
@@ -62,20 +66,20 @@ class SchedulerNode:
                 with open(path, "r") as f:
                     return json.load(f)
             except Exception as e:
-                print(f"[SCHEDULER] [WARN] Failed to read {path}: {e}", file=sys.stderr)
+                self.log.warning(f"[SCHEDULER] Failed to read {path}: {e}", sys.stderr)
         else:
-            print(f"[SCHEDULER] [WARN] File not found: {path}", file=sys.stderr)
+            self.log.warning(f"[SCHEDULER] File not found: {path}", sys.stderr)
         return {}
 
     def run(self):
         show_name = self.main_config.get("system", {}).get("show_name", "Holiday Lightshow")
 
-        print("==================================================", flush=True)
-        print(f"   {show_name.upper()} - SCHEDULER DAEMON   ", flush=True)
-        print("==================================================", flush=True)
-        print(f"[SCHEDULER] Main config: {self.main_config_path}", flush=True)
-        print(f"[SCHEDULER] Schedule matrix source: {self.schedule_path}", flush=True)
-        print(f"[SCHEDULER] API Target: {INIT_NODE_URL}", flush=True)
+        self.log.info("==================================================")
+        self.log.info(f"   {show_name.upper()} - SCHEDULER DAEMON   ")
+        self.log.info("==================================================")
+        self.log.info(f"[SCHEDULER] Main config: {self.main_config_path}")
+        self.log.info(f"[SCHEDULER] Schedule matrix source: {self.schedule_path}")
+        self.log.info(f"[SCHEDULER] API Target: {INIT_NODE_URL}")
 
         while self.running:
             try:
@@ -106,15 +110,15 @@ class SchedulerNode:
                     action_target = str(day_schedule[time_key]).strip()
 
                     if self.last_triggered_event != event_id:
-                        print(f"\n[SCHEDULER] Match found! [{day_name.upper()} {time_key}] -> Target: '{action_target}'", flush=True)
+                        self.log.info(f"\n[SCHEDULER] Match found! [{day_name.upper()} {time_key}] -> Target: '{action_target}'")
 
                         success = False
                         if action_target.upper() in ("ON", "ALL_ON"):
-                            success = query_initializer_api("/api/macro", {"action": "ON"})
+                            success = query_initializer_api("/api/macro", {"action": "ON"}, self.log)
                         elif action_target.upper() in ("OFF", "BLACKOUT"):
-                            success = query_initializer_api("/api/macro", {"action": "OFF"})
+                            success = query_initializer_api("/api/macro", {"action": "OFF"}, self.log)
                         elif action_target.upper() == "PANIC":
-                            success = query_initializer_api("/api/macro", {"action": "PANIC"})
+                            success = query_initializer_api("/api/macro", {"action": "PANIC"}, self.log)
                         else:
                             # Treat any other string as a playlist name.
                             # /api/show/start kills whatever is running before starting, so never fire it
@@ -122,19 +126,19 @@ class SchedulerNode:
                             # makes a retry safe if an earlier request timed out after the show had started.)
                             if current_state == "SHOW_RUNNING":
                                 now_playing = status.get("now_playing") or "unknown track"
-                                print(f"[SCHEDULER] Skipping '{action_target}' for {event_id}: a show is already "
-                                      f"running (now playing: {now_playing}).", flush=True)
+                                self.log.info(f"[SCHEDULER] Skipping '{action_target}' for {event_id}: a show is already "
+                                      f"running (now playing: {now_playing}).")
                                 self.last_triggered_event = event_id
                                 time.sleep(5.0)
                                 continue
-                            success = query_initializer_api("/api/show/start", {"playlist": action_target})
+                            success = query_initializer_api("/api/show/start", {"playlist": action_target}, self.log)
 
                         if success:
                             self.last_triggered_event = event_id
-                            print(f"[SCHEDULER] Command successfully dispatched for {event_id}.", flush=True)
+                            self.log.info(f"[SCHEDULER] Command successfully dispatched for {event_id}.")
 
             except Exception as e:
-                print(f"[SCHEDULER] Exception in main loop: {e}", file=sys.stderr)
+                self.log.error(f"[SCHEDULER] Exception in main loop: {e}", sys.stderr)
 
             # Sleep 5 seconds to ensure we hit the 1-minute window reliably
             time.sleep(5.0)
@@ -144,11 +148,21 @@ class SchedulerNode:
 
 
 def main():
-    scheduler = SchedulerNode(MAIN_CONFIG_PATH)
+    def load_log_level() -> str:
+        try:
+            if Path(MAIN_CONFIG_PATH).exists():
+                with open(Path(MAIN_CONFIG_PATH), "r", encoding="utf-8") as f:
+                    return json.load(f).get("log_level", "INFO")
+        except Exception:
+            pass
+        return "INFO"
+
+    log = get_node_logger("scheduler", load_log_level())
+    scheduler = SchedulerNode(MAIN_CONFIG_PATH, log)
     try:
         scheduler.run()
     except (KeyboardInterrupt, SystemExit):
-        print("\n[SCHEDULER] Scheduler shutting down cleanly.")
+        log.info("\n[SCHEDULER] Scheduler shutting down cleanly.")
 
 
 if __name__ == "__main__":

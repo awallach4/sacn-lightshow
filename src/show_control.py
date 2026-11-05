@@ -15,10 +15,7 @@ Optional main_config.json keys (all have defaults):
     system.sync.ready_timeout_s   max seconds to wait for workers to finish setup (default 60)
     system.sync.end_grace_s       extra seconds past the track's expected end (sequence/audio length +
                                   button_hold_s) before a stuck worker is killed (default 15)
-    system.sync.light_speed       light playback speed multiplier, e.g. 0.98 (default 1.0)
     system.broadcast.fm_enabled        false = no FM carrier; audio plays on local speakers (default true)
-    system.broadcast.audio_offset_s    shift FM audio vs lights; + = later (default 0.0)
-    system.broadcast.speaker_offset_s  shift monitor speakers vs lights (default 0.0)
 """
 
 import sys
@@ -31,6 +28,8 @@ import subprocess
 import argparse
 from pathlib import Path
 import urllib.request
+
+from logger_setup import get_node_logger, setup_global_exception_handler
 
 try:
     import psutil
@@ -67,12 +66,24 @@ def parse_args():
     parser.add_argument("-p", "--playlist", type=str, default="", help="The name of the playlist in playlist.json to use.")
     return parser.parse_args()
 
+def load_log_level() -> str:
+    try:
+        if Path(DEFAULT_MAIN_CONFIG).exists():
+            with open(Path(DEFAULT_MAIN_CONFIG), "r", encoding="utf-8") as f:
+                return json.load(f).get("log_level", "INFO")
+    except Exception:
+        pass
+    return "INFO"
+
+log = get_node_logger("show_control", load_log_level())
+setup_global_exception_handler(log)
+
 def load_system_configs(args):
     """Loads main_config.json and cleanly resolves linked playlist asset paths against PROJECT_ROOT."""
     abs_main_path = Path(args.config).resolve()
 
     if not abs_main_path.is_file():
-        print(f"[ERROR] Main config file not found: {abs_main_path}", file=sys.stderr)
+        log.error(f"[SHOW] Main config file not found: {abs_main_path}", sys.stderr)
         sys.exit(1)
 
     with open(abs_main_path, "r") as f:
@@ -86,7 +97,7 @@ def load_system_configs(args):
     playlist_path = (PROJECT_ROOT / raw_playlist_path.lstrip("/\\")).resolve()
 
     if not playlist_path.is_file():
-        print(f"[ERROR] Playlist file not found: {playlist_path}", file=sys.stderr)
+        log.error(f"[SHOW] Playlist file not found: {playlist_path}", sys.stderr)
         sys.exit(1)
 
     with open(playlist_path, "r") as f:
@@ -96,13 +107,13 @@ def load_system_configs(args):
 
     if isinstance(playlist_file_data, dict):
         if target_playlist_name not in playlist_file_data['playlists'].keys():
-            print(f"[ERROR] Playlist key '{target_playlist_name}' not found in {playlist_path}", file=sys.stderr)
+            log.error(f"[SHOW] Playlist key '{target_playlist_name}' not found in {playlist_path}", sys.stderr)
             sys.exit(1)
         playlist_data = playlist_file_data['playlists'][target_playlist_name]
     elif isinstance(playlist_file_data, list):
         playlist_data = playlist_file_data
     else:
-        print(f"[ERROR] Invalid format in playlist file: {playlist_path}", file=sys.stderr)
+        log.error(f"[SHOW] Invalid format in playlist file: {playlist_path}", sys.stderr)
         sys.exit(1)
 
     # Resolve relative audio and sequence paths inside playlist items
@@ -162,7 +173,7 @@ def send_sacn_blackout(universe=11, priority=100):
         sender.deactivate_output(universe)
         sender.stop()
     except Exception as e:
-        print(f"[SHOW] Warning: Could not send sACN blackout frame: {e}", file=sys.stderr)
+        log.warning(f"[SHOW] Could not send sACN blackout frame: {e}", sys.stderr)
 
 
 def terminate_all_children():
@@ -172,7 +183,7 @@ def terminate_all_children():
     """
     global active_processes, fm_carrier_proc
 
-    print("[SHOW CONTROL] Mass-terminating process groups...", flush=True)
+    log.info("[SHOW CONTROL] Mass-terminating process groups...")
 
     # 1. Kill active track worker process groups (audio + sACN)
     for proc in active_processes:
@@ -186,21 +197,21 @@ def terminate_all_children():
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], 
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
-                print(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}", file=sys.stderr)
+                log.error(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}", sys.stderr)
 
     active_processes.clear()
 
     # 2. Terminate persistent FM carrier process group
     if fm_carrier_proc and fm_carrier_proc.poll() is None:
         try:
-            print("[SHOW CONTROL] Killing FM carrier process group...", flush=True)
+            log.info("[SHOW CONTROL] Killing FM carrier process group...")
             if os.name != 'nt':
                 os.killpg(os.getpgid(fm_carrier_proc.pid), signal.SIGKILL)
             else:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(fm_carrier_proc.pid)], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
-            print(f"[SHOW CONTROL] Error killing FM carrier: {e}", file=sys.stderr)
+            log.error(f"[SHOW CONTROL] Error killing FM carrier: {e}", sys.stderr)
         fm_carrier_proc = None
 
 
@@ -215,7 +226,7 @@ def cleanup_and_exit(signum=None, frame=None):
     is_terminating = True
 
     sig_name = signal.Signals(signum).name if signum else "INTERNAL_CLEANUP"
-    print(f"\n[SHOW CONTROL] Signal received ({sig_name}). Executing immediate process group purge...", flush=True)
+    log.info(f"\n[SHOW CONTROL] Signal received ({sig_name}). Executing immediate process group purge...")
 
     # Nuke all child audio, sACN, and worker processes instantly
     terminate_all_children()
@@ -228,12 +239,12 @@ def cleanup_and_exit(signum=None, frame=None):
         except OSError:
             pass
 
-    print("[SHOW CONTROL] All process groups terminated and hardware interfaces released. Exiting.", flush=True)
+    log.info("[SHOW CONTROL] All process groups terminated and hardware interfaces released. Exiting.")
     sys.exit(0)
 
 def emergency_panic_latch(signum=None, frame=None):
     """Theatrical Emergency Panic Latch - triggers panic on Initializer Node then cleans up."""
-    print("\n[EMERGENCY] Panic Latch Triggered! Dispatching PANIC to Initializer Node...", flush=True)
+    log.warning("\n[EMERGENCY] Panic Latch Triggered! Dispatching PANIC to Initializer Node...")
     try:
         url = f"{INIT_NODE_URL}/api/macro"
         payload = json.dumps({"action": "PANIC"}).encode("utf-8")
@@ -246,7 +257,7 @@ def emergency_panic_latch(signum=None, frame=None):
         with urllib.request.urlopen(req, timeout=1.0):
             pass
     except Exception as e:
-        print(f"[EMERGENCY] Failed to notify Initializer Node: {e}", file=sys.stderr)
+        log.error(f"[EMERGENCY] Failed to notify Initializer Node: {e}", sys.stderr)
 
     cleanup_and_exit(signum, frame)
 
@@ -261,25 +272,27 @@ def init_persistent_fm_carrier():
     broadcast_cfg = sys_config.get("broadcast", {})
     freq = broadcast_cfg.get("fm_frequency", 90.3)
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
+    rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
     fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
 
     if not broadcast_cfg.get("fm_enabled", True):
-        print("[INIT] FM transmitter disabled by config (broadcast.fm_enabled = false).")
+        log.info("[INIT] FM transmitter disabled by config (broadcast.fm_enabled = false).")
         return
 
     if os.name == 'nt':
-        print("[INIT] Windows OS detected. FM transmitter initialization skipped.")
+        log.info("[INIT] Windows OS detected. FM transmitter initialization skipped.")
         return
 
     if not os.path.exists(fifo_path):
         os.mkfifo(fifo_path)
 
-    print(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
+    log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
     fm_cmd = [
         "pi_fm_rds",
         "-freq", str(freq),
         "-audio", fifo_path,
-        "-ps", ps_name
+        "-ps", ps_name,
+        "-rt", rt_text
     ]
     
     fm_carrier_proc = subprocess.Popen(
@@ -308,9 +321,9 @@ def check_track_lengths(audio_path, sequence_path):
         audio_s = float(out.stdout.strip())
     except Exception:
         return None, None  # soxi missing / unreadable header: skip silently
-    print(f"[CHECK] audio {audio_s:.2f}s vs sequence {seq_s:.2f}s (difference {seq_s - audio_s:+.2f}s)")
+    log.debug(f"[CHECK] audio {audio_s:.2f}s vs sequence {seq_s:.2f}s (difference {seq_s - audio_s:+.2f}s)")
     if abs(seq_s - audio_s) > 0.5:
-        print("[CHECK] WARNING: sequence and audio lengths differ by more than 0.5s. If the sequence is "
+        log.warning("[CHECK] WARNING: sequence and audio lengths differ by more than 0.5s. If the sequence is "
               "SHORTER, the lights end early by design of the file (re-render/re-export in xLights).")
     return audio_s, seq_s
 
@@ -325,7 +338,7 @@ def _pump_output(proc, name, ready_event):
         if line == READY_TOKEN:
             ready_event.set()
         elif line:
-            print(f"[{name}] {line}", flush=True)
+            log.info(f"[{name}] {line}")
 
 
 def _wait_until_ready(workers, timeout_s):
@@ -371,7 +384,7 @@ def run_track(track_idx, playlist):
     total_tracks = len(playlist)
     
     if not (0 <= track_idx < total_tracks):
-        print(f"[ERROR] Track index {track_idx} out of range.", file=sys.stderr)
+        log.error(f"[SHOW] Track index {track_idx} out of range.", sys.stderr)
         return False
 
     current_track = playlist[track_idx]
@@ -388,16 +401,16 @@ def run_track(track_idx, playlist):
     notify_current_track(now_playing=now_playing_title, next_up=next_up_title)
 
     if not os.path.isfile(audio_path):
-        print(f"[ERROR] Audio file missing: {audio_path}", file=sys.stderr)
+        log.error(f"[SHOW] Audio file missing: {audio_path}", sys.stderr)
         return False
     if not os.path.isfile(sequence_path):
-        print(f"[ERROR] Sequence file missing: {sequence_path}", file=sys.stderr)
+        log.error(f"[SHOW] Sequence file missing: {sequence_path}", sys.stderr)
         return False
 
-    print(f"\n==================================================")
-    print(f"[SHOW] Executing Track [{track_idx + 1}/{total_tracks}]: {now_playing_title}")
-    print(f"[SHOW] Sequence Target: {os.path.basename(sequence_path)}")
-    print(f"==================================================")
+    log.info(f"\n==================================================")
+    log.info(f"[SHOW] Executing Track [{track_idx + 1}/{total_tracks}]: {now_playing_title}")
+    log.info(f"[SHOW] Sequence Target: {os.path.basename(sequence_path)}")
+    log.info(f"==================================================")
 
     processes = []
     try:
@@ -406,8 +419,9 @@ def run_track(track_idx, playlist):
         lead_time_s = sync_cfg.get("lead_time_s", 1.0)          # runway between READY and T0
         ready_timeout_s = sync_cfg.get("ready_timeout_s", 60.0)  # max time for decode/setup
         end_grace_s = sync_cfg.get("end_grace_s", 15.0)          # hang guard once one worker finishes
-        fm_offset_s = broadcast_cfg.get("audio_offset_s", 0.0)   # calibrate FM latency (+ = later)
-        speaker_offset_s = broadcast_cfg.get("speaker_offset_s", 0.0)
+        fm_offset_s = current_track.get("audio_offset_s", 0.0)   # calibrate FM latency (+ = later)
+        speaker_offset_s = current_track.get("speaker_offset_s", 0.0)
+        rt_text = current_track.get("rds", broadcast_cfg['rds_rt_default'])
 
         audio_script = os.path.join(SRC_DIR, "audio_playback.py")
         sacn_script = os.path.join(SRC_DIR, "sacn/sacn_transmitter.py")
@@ -415,11 +429,11 @@ def run_track(track_idx, playlist):
 
         button_hold = current_track.get("button_hold_s", 0)
 
-        light_speed = sync_cfg.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
+        light_speed = current_track.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
         audio_s, seq_s = check_track_lengths(audio_path, sequence_path)
 
         audio_cmd = [sys.executable, "-u", audio_script, audio_path,
-                     "--offset", str(fm_offset_s), "--speaker-offset", str(speaker_offset_s)]
+                     "--offset", str(fm_offset_s), "--speaker-offset", str(speaker_offset_s), "--rds-text", rt_text]
         if not broadcast_cfg.get("fm_enabled", True):
             audio_cmd.append("--no-fm")
         sacn_cmd = [sys.executable, "-u", sacn_script, sequence_path, "--universe", str(universe),
@@ -453,7 +467,7 @@ def run_track(track_idx, playlist):
 
         # Phase 2: Send T0 clock lock
         t0 = time.monotonic() + lead_time_s
-        print(f"[SYNC] Both workers ready. T0 Clock Lock Engaged: starting in {lead_time_s:.2f}s.")
+        log.info(f"[SYNC] Both workers ready. T0 Clock Lock Engaged: starting in {lead_time_s:.2f}s.")
         trigger_msg = f"{t0!r}\n"
         for proc in (audio_proc, sacn_proc):
             proc.stdin.write(trigger_msg)
@@ -477,22 +491,22 @@ def run_track(track_idx, playlist):
                     first_exit = now
                 if now > max(hard_deadline, first_exit + end_grace_s):
                     laggard = "sacn" if audio_done else "audio"
-                    print(f"[WARN] {laggard} worker still running well past the expected end of the track; "
-                          f"terminating it.", file=sys.stderr)
+                    log.warning(f"[SHOW] {laggard} worker still running well past the expected end of the track; "
+                          f"terminating it.", sys.stderr)
                     break
             time.sleep(0.05)
 
         for name, proc in (("audio", audio_proc), ("sacn", sacn_proc)):
             if proc.poll() not in (None, 0):
-                print(f"[WARN] {name} worker exited with code {proc.returncode}", file=sys.stderr)
+                log.warning(f"[SHOW] {name} worker exited with code {proc.returncode}", sys.stderr)
 
-        print(f"[SHOW] Track '{now_playing_title}' completed cleanly")
+        log.info(f"[SHOW] Track '{now_playing_title}' completed cleanly")
 
     except KeyboardInterrupt:
-        print("\n[WARN] Track execution aborted by signal.", file=sys.stderr)
+        log.warning("\n[SHOW] Track execution aborted by signal.", sys.stderr)
         raise
     except Exception as e:
-        print(f"[ERROR] Exception during track playback: {e}", file=sys.stderr)
+        log.error(f"[SHOW] Exception during track playback: {e}", sys.stderr)
         return False
     finally:
         for proc in processes:
@@ -511,17 +525,17 @@ def run_track(track_idx, playlist):
     # Inter-track delay
     try:
         inter_track_delay = current_track.get("post_delay_s", 3.0)
-        print("[SHOW] Holding inter-track blackout head...", flush=True)
+        log.info("[SHOW] Holding inter-track blackout head...")
         time.sleep(inter_track_delay)
     except Exception as e:
-        print(f"[WARN] Non-fatal error during inter-track delay: {e}", file=sys.stderr)
+        log.warning(f"[SHOW] Non-fatal error during inter-track delay: {e}", sys.stderr)
 
     return True  # Proceed to track idx + 1
 
 def graceful_shutdown():
     """Clean, non-emergency shutdown for normal show completion."""
     global fm_carrier_proc, sys_config
-    print("\n[SHOW] Performing graceful show completion and blackout...")
+    log.info("\n[SHOW] Performing graceful show completion and blackout...")
     
     # Issue standard Priority 100 blackout frame
     net_cfg = sys_config.get("network", {})
@@ -533,7 +547,7 @@ def graceful_shutdown():
     if fm_carrier_proc and fm_carrier_proc.poll() is None:
         fm_carrier_proc.terminate()
 
-    print("[SHOW] Show engine stopped cleanly. Exiting with status 0.")
+    log.info("[SHOW] Show engine stopped cleanly. Exiting with status 0.")
 
 # ==============================================================================
 # MAIN ENTRY POINT
@@ -550,11 +564,11 @@ def main():
     # Load Central Configs
     sys_config, playlist = load_system_configs(args)
 
-    print("==================================================")
-    print(f"   {sys_config.get('show_name', 'RESIDENTIAL LIGHT SHOW DAEMON')}   ")
-    print("==================================================")
-    print(f"[INIT] Loaded system configuration from: {os.path.abspath(args.config)}")
-    print(f"[INIT] Playlist contains {len(playlist)} tracks.")
+    log.info("==================================================")
+    log.info(f"   {sys_config.get('show_name', 'RESIDENTIAL LIGHT SHOW DAEMON')}   ")
+    log.info("==================================================")
+    log.info(f"[INIT] Loaded system configuration from: {os.path.abspath(args.config)}")
+    log.info(f"[INIT] Playlist contains {len(playlist)} tracks.")
 
     # Initialize persistent broadcast carrier
     init_persistent_fm_carrier()
@@ -563,25 +577,25 @@ def main():
 
     try:
         for idx in range(len(playlist)):
-            print(f"\n[SHOW CONTROL] Starting track index {idx} of {len(playlist)}...", flush=True)
+            log.info(f"\n[SHOW CONTROL] Starting track index {idx} of {len(playlist)}...")
             if is_panicked:
                 show_failed = True
                 break
             success = run_track(idx, playlist)      
             if not success:
-                print(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.", file=sys.stderr, flush=True)
+                log.info(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.", sys.stderr)
                 break
         else:
-            print("[SHOW CONTROL] Completed all tracks in playlist successfully.", flush=True)            
+            log.info("[SHOW CONTROL] Completed all tracks in playlist successfully.")            
 
     except Exception as e:
-        print(f"[ERROR] Unexpected exception in main show loop: {e}")
+        log.error(f"[SHOW CONTROL] Unexpected exception in main show loop: {e}")
         show_failed = True
 
     if show_failed or is_panicked:
         emergency_panic_latch()
     else:
-        print("\n[SHOW] Playlist execution finished successfully.")
+        log.info("\n[SHOW] Playlist execution finished successfully.")
         graceful_shutdown()
         sys.exit(0)
 

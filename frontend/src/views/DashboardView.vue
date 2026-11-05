@@ -10,6 +10,7 @@ const cpu_usage = ref<number>(0)
 const ram_usage = ref<number>(0)
 const cpu_temp = ref<number>(0)
 const isBackendConnected = ref<boolean>(true)
+const system_state = ref<string>('')
 
 const node_status = ref<Record<string, boolean>>({
   'sACN Transmitter': false,
@@ -25,8 +26,6 @@ const next_song = ref('')
 // Button Loading States
 const isMacroLoading = reactive<Record<string, boolean>>({
   start_show: false,
-  prev_track: false,
-  next_track: false,
   all_on: false,
   blackout: false,
   panic: false,
@@ -51,6 +50,7 @@ const loadPlaylistConfig = async () => {
     const parsed = JSON.parse(data.content)
     if (parsed.playlists) {
       playlists.value = Object.keys(parsed.playlists)
+      selected_playlist.value = playlists.value[0] || ''
     }
   } catch {
     // Quiet handling when dev server is offline
@@ -73,6 +73,7 @@ const fetchTelemetry = async () => {
     cpu_temp.value = data.cpu_temp
     current_song.value = data.now_playing
     next_song.value = data.next_up
+    system_state.value = data.system_state
 
     if (data.node_status) {
       node_status.value = data.node_status
@@ -218,13 +219,46 @@ useSeoMeta({
               />
             </div>
           </div>
+          <span>System State:</span>
+          <div
+            class="flex justify-between items-center py-1 px-4 rounded-lg text-neutral-200"
+            :class="{
+              'bg-green-800/80': isBackendConnected && system_state === 'STATIC_ON',
+              'bg-gray-800/80': isBackendConnected && system_state === 'OFF',
+              'bg-red-800/80': !isBackendConnected || system_state === 'PANIC' || !system_state,
+              'bg-blue-800/80': isBackendConnected && system_state === 'SHOW_RUNNING',
+            }"
+          >
+            <span>{{
+              system_state === 'STATIC_ON'
+                ? 'Lights On'
+                : system_state === 'OFF'
+                  ? 'Lights Off'
+                  : system_state === 'SHOW_RUNNING'
+                    ? 'Show Running'
+                    : system_state === 'PANIC'
+                      ? 'System Panic'
+                      : 'Disconnected'
+            }}</span>
+            <UIcon
+              :name="
+                isBackendConnected && system_state === 'STATIC_ON'
+                  ? 'i-lucide-lightbulb'
+                  : isBackendConnected && system_state === 'OFF'
+                    ? 'i-lucide-lightbulb-off'
+                    : isBackendConnected && system_state === 'SHOW_RUNNING'
+                      ? 'i-lucide-play'
+                      : 'i-lucide-octagon-alert'
+              "
+            />
+          </div>
         </UPageCard>
 
         <!-- Show Macros -->
         <UPageCard title="Show Macros" variant="subtle">
           <USelect v-model="selected_playlist" :items="playlists" placeholder="Select a Playlist" />
           <UButton
-            class="justify-center text-neutral-900"
+            class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.start_show"
             :disabled="current_song.length > 0"
             @click="startShow()"
@@ -234,7 +268,7 @@ useSeoMeta({
 
           <UButton
             color="info"
-            class="justify-center text-neutral-900"
+            class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.all_on"
             @click="sendMacro('all_on')"
           >
@@ -242,14 +276,14 @@ useSeoMeta({
           </UButton>
           <UButton
             color="error"
-            class="justify-center text-neutral-900"
+            class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.blackout"
             @click="sendMacro('blackout')"
           >
             Blackout
           </UButton>
 
-          <div class="flex flex-col gap-1 mt-2">
+          <div class="flex flex-col gap-1">
             <strong>Now Playing: {{ current_song || 'None' }}</strong>
             <strong>Next Track: {{ next_song || 'None' }}</strong>
           </div>
@@ -270,7 +304,7 @@ useSeoMeta({
           <div class="flex flex-col justify-between gap-4">
             <UButton
               color="warning"
-              class="justify-center text-neutral-900"
+              class="justify-center text-neutral-900 h-8"
               :loading="isMacroLoading.panic"
               @click="sendMacro('panic')"
             >
@@ -278,7 +312,7 @@ useSeoMeta({
             </UButton>
             <UButton
               color="neutral"
-              class="justify-center"
+              class="justify-center h-8"
               :loading="isHostLoading.reboot"
               @click="executeHostAction('reboot')"
             >
@@ -286,7 +320,7 @@ useSeoMeta({
             </UButton>
             <UButton
               color="error"
-              class="justify-center text-neutral-900"
+              class="justify-center text-neutral-900 h-8"
               :loading="isHostLoading.shutdown"
               @click="executeHostAction('shutdown')"
             >

@@ -6,8 +6,8 @@ import { useSeoMeta } from '@unhead/vue'
 import { reactive, ref, onMounted, useTemplateRef } from 'vue'
 
 const state = reactive<{
-  audio: File | File[] | null
-  lights: File | File[] | null
+  audio: File | null
+  lights: File | null
   playlist: string[] | string
 }>({
   audio: null,
@@ -32,10 +32,10 @@ type Schema = typeof state
 
 const validate = (state: Partial<Schema>): FormError[] => {
   const errors = []
-  if (!state.audio || (Array.isArray(state.audio) && state.audio.length === 0)) {
+  if (!state.audio) {
     errors.push({ name: 'audio', message: 'Audio File Required' })
   }
-  if (!state.lights || (Array.isArray(state.lights) && state.lights.length === 0)) {
+  if (!state.lights) {
     errors.push({ name: 'lights', message: 'FSEQ File Required' })
   }
   if (!state.playlist || (Array.isArray(state.playlist) && state.playlist.length === 0)) {
@@ -68,15 +68,34 @@ const onSubmit = async () => {
   isUploading.value = true
 
   const formData = new FormData()
-  const rawAudio = Array.isArray(state.audio) ? state.audio[0] : state.audio
-  const rawLights = Array.isArray(state.lights) ? state.lights[0] : state.lights
+  const validAudioExtensions = ['.mp3', '.wav', '.aac', '.aif', '.ogg', '.flac']
+  const validLightsExtensions = ['.fseq']
+  const audioExt = state.audio?.name.slice(state.audio.name.lastIndexOf('.')).toLowerCase() || ''
+  const lightsExt = state.lights?.name.slice(state.lights.name.lastIndexOf('.')).toLowerCase() || ''
+
   const selectedPLs = Array.isArray(state.playlist) ? state.playlist : [state.playlist]
 
-  if (rawAudio) formData.append('audio', rawAudio)
-  if (rawLights) formData.append('lights', rawLights)
+  if (state.audio) formData.append('audio', state.audio)
+  if (state.lights) formData.append('lights', state.lights)
   formData.append('playlists', JSON.stringify(selectedPLs))
 
   try {
+    if (!validAudioExtensions.includes(audioExt)) {
+      throw new Error(
+        '[Audio] Please upload a valid audio file (.wav, .mp3, .aac, .aif, .ogg, .flac)',
+      )
+    }
+
+    if (!validLightsExtensions.includes(lightsExt)) {
+      throw new Error('[Lights] Please upload a valid .fseq file')
+    }
+    if (state.audio && state.audio.size > 150 * 1024 * 1024) {
+      throw new Error('[Audio] Max file size is 150 MB')
+    }
+    if (state.lights && state.lights.size > 5 * 1024 * 1024) {
+      throw new Error('[Lights] Max file size is 5 MB')
+    }
+
     const res = await fetch('/api/playlist/upload', {
       method: 'POST',
       body: formData,
@@ -139,7 +158,7 @@ useSeoMeta({
       <UFormField name="audio">
         <UFileUpload
           v-model="state.audio"
-          accept="audio/*"
+          accept="audio/mp3,audio/wav,audio/ogg,audio/aac,audio/aif,audio/flac"
           label="Drop Music File Here"
           description="MP3 or WAV"
           icon="i-lucide-music"
