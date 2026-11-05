@@ -129,10 +129,10 @@ class InitializerNode:
             self.processes["scheduler"] = subprocess.Popen([py_exe, sched_script])
 
         # 3. sACN Listener Node (sacn_listener.py)
-        # listener_script = "src/sacn/sacn_listener.py"
-        # if os.path.exists(listener_script):
-        #     print(f"[INIT] Launching sACN Listener ({listener_script})...", flush=True)
-        #     self.processes["sacn_listener"] = subprocess.Popen([py_exe, listener_script, "-p", "config/patch.json"])
+        listener_script = "src/sacn/sacn_listener.py"
+        if os.path.exists(listener_script):
+            print(f"[INIT] Launching sACN Listener ({listener_script})...", flush=True)
+            self.processes["sacn_listener"] = subprocess.Popen([py_exe, listener_script, "-p", "config/patch.json"])
 
         # Start Process Health Monitor
         self.monitor_thread = threading.Thread(target=self._monitor_processes, daemon=True)
@@ -145,7 +145,7 @@ class InitializerNode:
             script_map = {
                 "web_server": "src/web/app.py",
                 "scheduler": "src/scheduler.py",
-                # "sacn_listener": "src/sacn/sacn_listener.py"
+                "sacn_listener": "src/sacn/sacn_listener.py"
             }
             
             for name, script_path in script_map.items():
@@ -154,7 +154,7 @@ class InitializerNode:
                     print(f"[INIT] [WARN] Process '{name}' exited unexpectedly with code {proc.returncode}. Restarting...", flush=True)
                     if os.path.exists(script_path):
                         if name == "sacn_listener":
-                            self.processes[name] = subprocess.Popen([py_exe, script_path])
+                            self.processes[name] = subprocess.Popen([py_exe, script_path, "-p", "config/patch.json"])
                         else:
                             self.processes[name] = subprocess.Popen([py_exe, script_path])
 
@@ -251,9 +251,6 @@ class InitializerNode:
     # --- STATE ACTIONS & MACROS ---
     def stop_active_output(self):
         """Halts active show execution, stops macro threads, and forcefully purges worker processes."""
-        # Print a stack/caller trace to see what endpoint or method invoked stop_active_output
-        import traceback
-        print(f"[INIT DEBUG] stop_active_output() called from:\n{''.join(traceback.format_stack())}", flush=True)
 
         self.macro_active = False
 
