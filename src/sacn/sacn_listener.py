@@ -40,7 +40,7 @@ if IS_LINUX:
         log.info("[HAL] Running on Linux/Raspberry Pi: Loaded native lgpio driver.")
     except ImportError:
         lgpio = None
-        log.warn("[HAL] Linux host without native lgpio package. Ensure python3-lgpio is installed.")
+        log.warning("[HAL] Linux host without native lgpio package. Ensure python3-lgpio is installed.")
 else:
     lgpio = None
     log.info("[HAL] Running on Non-Linux host: Mock GPIO fallback active.")

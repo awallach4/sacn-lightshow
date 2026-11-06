@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import ssl
 
 IMPORT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -9,6 +10,8 @@ if str(IMPORT_ROOT) not in sys.path:
 from logger_setup import get_node_logger
 
 CONFIG_FILE = Path("config/main_config.json")
+CERT_PATH = Path("config/jobber.tail7de9f9.ts.net.crt")
+KEY_PATH = Path("config/jobber.tail7de9f9.ts.net.key")
 
 def load_log_level() -> str:
     try:
@@ -541,6 +544,14 @@ def serve_static(path):
 
 
 if __name__ == "__main__":
-    log.info("[Flask] Starting gevent WSGI server on port 5000...")
-    http_server = WSGIServer(("0.0.0.0", 5000), app, handler_class=WebSocketHandler)
+    if os.path.exists(CERT_PATH) and os.path.exists(KEY_PATH):
+        log.info("[Flask] Starting HTTPS WSGI server on port 5000...")
+        ssl_args = {
+            "certfile": CERT_PATH,
+            "keyfile": KEY_PATH
+        }
+        http_server = WSGIServer(('0.0.0.0', 5000), app, **ssl_args)
+    else:
+        log.info("[Flask] Starting gevent WSGI server on port 5000...")
+        http_server = WSGIServer(("0.0.0.0", 5000), app, handler_class=WebSocketHandler)
     http_server.serve_forever()
