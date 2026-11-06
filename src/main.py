@@ -181,6 +181,44 @@ class InitializerNode:
 
             time.sleep(2.0)
 
+    # --- CONFIG RESTART ACTIONS ---
+    def restart_node(self, name: str):
+        """Safely restarts a single managed child node process."""
+        py_exe = sys.executable
+        script_map = {
+            "web_server": "src/web/app.py",
+            "scheduler": "src/scheduler.py",
+            "sacn_listener": "src/sacn/sacn_listener.py"
+        }
+
+        if name not in script_map:
+            self.log.warning(f"[INIT] Cannot restart unknown node: {name}")
+            return
+
+        proc = self.processes.get(name)
+        if proc and proc.poll() is None:
+            self.log.info(f"[INIT] Terminating '{name}' (PID {proc.pid}) for config update restart...")
+            kill_tree(proc)
+
+        script_path = script_map[name]
+        if os.path.exists(script_path):
+            self.log.info(f"[INIT] Respawning '{name}' ({script_path})...")
+            if name == "sacn_listener":
+                self.processes[name] = subprocess.Popen([py_exe, script_path, "-p", "config/patch.json"])
+            else:
+                self.processes[name] = subprocess.Popen([py_exe, script_path])
+
+    def restart_full_system(self):
+        """Executes a full stack teardown and process restart."""
+        self.log.warning("[INIT] Executing full system stack reload due to main_config change...")
+        self.cleanup()
+        # On Linux/systemd, exiting allows systemd to automatically restart main.py.
+        # On Windows/Dev, re-exec the main process wrapper.
+        if os.name != 'nt':
+            sys.exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def _get_all_patched_universes(self) -> dict[int, list[int]]:
         """
         Reads config/patch.json and returns a dictionary mapping:
@@ -480,6 +518,47 @@ def make_ipc_handler(node: InitializerNode):
                     threading.Thread(target=node.execute_host_command, args=(action,), daemon=True).start()
                 else:
                     self._send_json(400, {"error": f"Invalid host command '{action}'"})
+
+            elif self.path == "/api/config/reload":
+                config_type = str(data.get("config_type", "")).lower()
+
+                # Guard: Block configuration restarts if a show is running
+                if node.current_state == State.SHOW_RUNNING:
+                    self._send_json(409, {
+                        "error": f"Cannot reload {config_type}.json while show is running. Stop show first."
+                    })
+                    return
+
+                if config_type == "playlist":
+                    # No process restart needed; show_control reads playlist dynamically on run
+                    self._send_json(200, {
+                        "status": "ok", 
+                        "message": "Playlist config updated. Will take effect on next play cycle."
+                    })
+
+                elif config_type == "schedule":
+                    node.restart_node("scheduler")
+                    self._send_json(200, {
+                        "status": "ok", 
+                        "message": "Scheduler node process restarted with new schedule."
+                    })
+
+                elif config_type == "patch":
+                    node.restart_node("sacn_listener")
+                    self._send_json(200, {
+                        "status": "ok", 
+                        "message": "sACN listener process restarted with new channel patch."
+                    })
+
+                elif config_type == "main_config":
+                    self._send_json(200, {
+                        "status": "ok", 
+                        "message": "Full system process stack reloading..."
+                    })
+                    threading.Thread(target=node.restart_full_system, daemon=True).start()
+
+                else:
+                    self._send_json(400, {"error": f"Unknown config_type '{config_type}'"})
             else:
                 self._send_json(404, {"error": "Endpoint not found"})
 

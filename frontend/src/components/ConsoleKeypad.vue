@@ -33,35 +33,35 @@ const buttons = [
   { label: '-', value: ' - ', type: 'syntax' },
   { label: '/', value: '/', type: 'syntax' },
   { label: 'Sneak', value: 'SNEAK', type: 'syntax' },
-  { label: 'Undo', value: 'UNDO', type: 'undo' },
+  { label: 'Undo', value: 'UNDO', type: 'undo right' },
 
   { label: '7', value: '7', type: 'num' },
   { label: '8', value: '8', type: 'num' },
   { label: '9', value: '9', type: 'num' },
   { label: 'Rem Dim', value: 'REMDIM', type: 'syntax' },
   { label: 'Home', value: 'HOME', type: 'syntax' },
-  { label: 'Chan Check', value: 'CHAN_CHECK', type: 'action' },
+  { label: 'Chan Check', value: 'CHECK', type: 'action right' },
 
   { label: '4', value: '4', type: 'num' },
   { label: '5', value: '5', type: 'num' },
   { label: '6', value: '6', type: 'num' },
   { label: 'Out', value: 'OUT', type: 'action' },
   { label: 'Select Last', value: 'SELECTLAST', type: 'action' },
-  { label: 'Last', value: 'LAST', type: 'action' },
+  { label: 'Last', value: 'LAST', type: 'action right' },
 
   { label: '1', value: '1', type: 'num' },
   { label: '2', value: '2', type: 'num' },
   { label: '3', value: '3', type: 'num' },
   { label: 'Full', value: 'FULL', type: 'syntax' },
   { label: 'Select Active', value: 'SELECTACTIVE', type: 'action' },
-  { label: 'Next', value: 'NEXT', type: 'action' },
+  { label: 'Next', value: 'NEXT', type: 'action right' },
 
   { label: 'Clear', value: 'CLEAR', type: 'clear' },
   { label: '0', value: '0', type: 'num' },
   { label: '.', value: '.', type: 'num' },
   { label: 'At', value: ' AT ', type: 'syntax' },
   { label: 'Enter', value: 'ENTER', type: 'enter' },
-  { label: 'Address', value: 'ADDRESS', type: 'syntax' },
+  { label: 'Address', value: 'ADDRESS', type: 'syntax right small' },
 ]
 </script>
 
@@ -85,10 +85,11 @@ const buttons = [
 
 .key-btn {
   height: 54px;
+  width: 64px;
   border: 1px solid #27272a;
   border-radius: 6px;
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   font-family: monospace;
   cursor: pointer;
   background: #27272a;
@@ -102,6 +103,10 @@ const buttons = [
 .key-btn:active {
   transform: translateY(1px);
   background: #3f3f46;
+}
+
+.key-btn.right {
+  margin-left: 16px;
 }
 
 .key-btn.syntax {
@@ -153,7 +158,15 @@ const buttons = [
   }
   .key-btn {
     height: 48px;
+    width: auto;
+    min-width: 32px;
     font-size: 0.8rem;
+  }
+  .key-btn.right {
+    margin-left: 4px;
+  }
+  .key-btn.small {
+    font-size: 0.6rem;
   }
 }
 </style>

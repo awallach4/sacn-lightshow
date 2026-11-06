@@ -54,7 +54,7 @@ const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === '5') {
       e.preventDefault()
       e.stopPropagation()
-      handleKeyPress('CHAN_CHECK')
+      handleKeyPress('CHECK')
     } else if (e.key === 'a') {
       e.preventDefault()
       e.stopPropagation()

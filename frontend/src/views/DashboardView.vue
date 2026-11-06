@@ -223,10 +223,10 @@ useSeoMeta({
           <div
             class="flex justify-between items-center py-1 px-4 rounded-lg text-neutral-200"
             :class="{
-              'bg-green-800/80': isBackendConnected && system_state === 'STATIC_ON',
+              'bg-blue-800/80': isBackendConnected && system_state === 'STATIC_ON',
               'bg-gray-800/80': isBackendConnected && system_state === 'OFF',
               'bg-red-800/80': !isBackendConnected || system_state === 'PANIC' || !system_state,
-              'bg-blue-800/80': isBackendConnected && system_state === 'SHOW_RUNNING',
+              'bg-green-800/80': isBackendConnected && system_state === 'SHOW_RUNNING',
             }"
           >
             <span>{{
@@ -256,11 +256,16 @@ useSeoMeta({
 
         <!-- Show Macros -->
         <UPageCard title="Show Macros" variant="subtle">
-          <USelect v-model="selected_playlist" :items="playlists" placeholder="Select a Playlist" />
+          <USelect
+            v-model="selected_playlist"
+            :items="playlists"
+            placeholder="Select a Playlist"
+            :disabled="system_state === 'SHOW_RUNNING'"
+          />
           <UButton
             class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.start_show"
-            :disabled="current_song.length > 0"
+            :disabled="system_state === 'SHOW_RUNNING'"
             @click="startShow()"
           >
             Start Show
@@ -308,7 +313,7 @@ useSeoMeta({
               :loading="isMacroLoading.panic"
               @click="sendMacro('panic')"
             >
-              PANIC MODE
+              Emergency Shutoff
             </UButton>
             <UButton
               color="neutral"

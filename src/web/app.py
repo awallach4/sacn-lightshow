@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-
 IMPORT_ROOT = Path(__file__).resolve().parent.parent
 
 if str(IMPORT_ROOT) not in sys.path:
@@ -9,7 +8,8 @@ if str(IMPORT_ROOT) not in sys.path:
 
 from logger_setup import get_node_logger
 
-CONFIG_FILE = "config/main_config.json"
+CONFIG_FILE = Path("config/main_config.json")
+
 def load_log_level() -> str:
     try:
         if CONFIG_FILE.exists():
@@ -28,7 +28,7 @@ def _fatal_import(exc):
     log.error(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})")
     log.error(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt")
     log.error("[Flask]   (Ubuntu 23.04+ blocks system-wide pip installs: use a venv, and start main.py with that "
-          "venv's python, also under sudo.)")
+              "venv's python, also under sudo.)")
     sys.exit(1)
 
 
@@ -45,7 +45,6 @@ import os
 import json
 import time
 import platform
-import subprocess
 import urllib.request
 import urllib.error
 
@@ -72,9 +71,6 @@ if IS_WINDOWS:
     IPC_DIR.mkdir(exist_ok=True)
 else:
     IPC_DIR = Path("/dev/shm")
-
-STATE_FILE_PATH = IPC_DIR / "show_state.json"
-CMD_FILE_PATH = IPC_DIR / "show_macro_cmd.json"
 
 # Initializer Node IPC Endpoint
 INIT_NODE_URL = "http://127.0.0.1:5001"
@@ -131,17 +127,24 @@ def query_initializer_node(endpoint: str, method: str = "GET", payload: dict = N
     except Exception as e:
         return {"error": f"Initializer Node unreachable: {str(e)}"}, 503
 
+
+def is_show_active() -> bool:
+    """Query Initializer Node status to check if a show is actively running."""
+    init_data, status_code = query_initializer_node("/api/status", method="GET")
+    if status_code == 200:
+        return init_data.get("system_state") == "SHOW_RUNNING"
+    return False
+
+
 # -------------------------------------------------------------------
-# Telemetry Endpoint (Host Resource Metrics & Initializer Process States)
+# Telemetry Endpoint
 # -------------------------------------------------------------------
 @app.route("/api/telemetry", methods=["GET"])
 def get_telemetry():
-    # 1. Fetch Host Resource Metrics
     cpu_usage = psutil.cpu_percent(interval=None)
     ram_usage = psutil.virtual_memory().percent
     cpu_temp = get_cpu_temp()
 
-    # 2. Query Initializer Node for process states
     init_data, status_code = query_initializer_node("/api/status", method="GET")
 
     system_state = "UNKNOWN"
@@ -180,7 +183,6 @@ def execute_macro():
     payload = request.get_json() or {}
     action = str(payload.get("action", "")).strip().lower()
 
-    # Map all possible frontend string variants to Initializer Node commands
     macro_map = {
         "on": "ON",
         "all_on": "ON",
@@ -199,6 +201,7 @@ def execute_macro():
 
     res_body, status_code = query_initializer_node("/api/macro", method="POST", payload=init_payload)
     return jsonify(res_body), status_code
+
 
 # -------------------------------------------------------------------
 # Show Control Start Endpoint
@@ -228,7 +231,6 @@ def host_control(command):
     if cmd not in ["reboot", "shutdown"]:
         return jsonify({"error": "Invalid host command. Options: ['reboot', 'shutdown']"}), 400
 
-    # Delegate host power commands to Initializer Node so it can cleanly stop services first
     res_body, status_code = query_initializer_node(
         "/api/host",
         method="POST",
@@ -236,17 +238,16 @@ def host_control(command):
     )
     return jsonify(res_body), status_code
 
+
 ###############################################################################
 #                          Config & Playlist Backend                          #
 ###############################################################################
 
-# Resolve base directories for sacn-lightshow layout
 SHOWFILES_DIR = PROJECT_ROOT / "showfiles"
 MUSIC_DIR = SHOWFILES_DIR / "music"
 SEQUENCES_DIR = SHOWFILES_DIR / "sequences"
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-# Target JSON configuration files
 CONFIG_FILES = {
     "main_config": CONFIG_DIR / "main_config.json",
     "patch": CONFIG_DIR / "patch.json",
@@ -254,12 +255,11 @@ CONFIG_FILES = {
     "schedule": CONFIG_DIR / "schedule.json"
 }
 
-# Ensure target directories exist on server start
 MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 SEQUENCES_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Helper to load playlist structure safely
+
 def load_playlists_data() -> dict:
     playlist_path = CONFIG_FILES["playlist"]
     if playlist_path.is_file():
@@ -268,18 +268,14 @@ def load_playlists_data() -> dict:
                 return json.load(f)
         except Exception:
             pass
-    # Default fallback structure if file is missing or unparseable
     return {"playlists": {}}
 
-# -------------------------------------------------------------------
-# GET / POST: Unified Dynamic JSON Config Management
-# Supports: /api/config/main_config, /api/config/patch, /api/config/playlist
-# -------------------------------------------------------------------
+
 @app.route("/api/config/<config_type>", methods=["GET"])
 def get_json_config(config_type):
-    """Returns the raw content of the requested JSON configuration file."""
+    """Returns raw text content of requested JSON config file."""
     if config_type not in CONFIG_FILES:
-        return jsonify({"error": f"Invalid configuration type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
+        return jsonify({"error": f"Invalid config type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
 
     target_file = CONFIG_FILES[config_type]
 
@@ -299,31 +295,35 @@ def get_json_config(config_type):
     except Exception as e:
         return jsonify({"error": f"Failed to read {config_type}.json: {str(e)}"}), 500
 
+
 @app.route("/api/config/<config_type>", methods=["POST"])
 def save_json_config(config_type):
-    """Saves raw text content back to the specified JSON configuration file after syntax validation."""
+    """Saves raw text content to JSON configuration and triggers target node reload via IPC."""
     if config_type not in CONFIG_FILES:
-        return jsonify({"error": f"Invalid configuration type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
+        return jsonify({"error": f"Invalid config type '{config_type}'. Options: {list(CONFIG_FILES.keys())}"}), 404
+
+    # Guard: Block saves while a show is running
+    if is_show_active():
+        return jsonify({"error": f"Cannot modify {config_type}.json while show is running. Stop the show first."}), 409
 
     payload = request.get_json(silent=True) or {}
     raw_content = payload.get("content")
 
     if raw_content is None:
-        return jsonify({ "error": "Missing 'content' field in request body." }), 400
+        return jsonify({"error": "Missing 'content' field in request body."}), 400
 
-    # Validate JSON syntax before overwriting
     try:
         if isinstance(raw_content, str):
             parsed_data = json.loads(raw_content)
         elif isinstance(raw_content, (dict, list)):
             parsed_data = raw_content
         else:
-            return jsonify({ "error": "Content must be a JSON string or valid object/array."}), 400
+            return jsonify({"error": "Content must be a JSON string or valid object/array."}), 400
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON syntax: {str(e)}"}), 400
 
     target_file = CONFIG_FILES[config_type]
-    temp_file = target_file.with_name(".json.tmp")
+    temp_file = target_file.with_name(f".{config_type}.json.tmp")
 
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -332,20 +332,35 @@ def save_json_config(config_type):
 
         os.replace(temp_file, target_file)
 
-        return jsonify({"status": "success", "message": f"{config_type}.json saved successfully"}), 200
+        # Notify main.py Initializer Node via IPC to restart targeted worker node(s)
+        res_body, status_code = query_initializer_node(
+            "/api/config/reload",
+            method="POST",
+            payload={"config_type": config_type}
+        )
+
+        if status_code != 200:
+            return jsonify({"warning": f"Saved {config_type}.json, but IPC reload failed: {res_body.get('error')}"}), status_code
+
+        return jsonify({
+            "status": "success",
+            "message": f"{config_type}.json saved. {res_body.get('message', '')}"
+        }), 200
+
     except Exception as e:
         if temp_file.exists():
             temp_file.unlink(missing_ok=True)
         return jsonify({"error": f"Failed to write {config_type}.json: {str(e)}"}), 500
 
-# -------------------------------------------------------------------
-# POST: File Upload and Auto-Playlist Assignment
-# -------------------------------------------------------------------
+
 @app.route("/api/playlist/upload", methods=["POST"])
 def upload_show_files():
-    """Handles audio + sequence upload, overwriting files and updating playlist entries."""
+    """Handles audio + sequence upload and updates playlist entries."""
     if "audio" not in request.files or "lights" not in request.files:
         return jsonify({"error": "Missing audio or sequence file in request"}), 400
+
+    if is_show_active():
+        return jsonify({"error": "Cannot upload files while show is running. Stop the show first."}), 409
 
     audio_file = request.files["audio"]
     lights_file = request.files["lights"]
@@ -359,7 +374,6 @@ def upload_show_files():
     if not audio_file.filename or not lights_file.filename:
         return jsonify({"error": "No selected file names"}), 400
 
-    # Secure filenames
     audio_name = secure_filename(audio_file.filename)
     lights_name = secure_filename(lights_file.filename)
 
@@ -367,11 +381,9 @@ def upload_show_files():
     lights_dest = SEQUENCES_DIR / lights_name
 
     try:
-        # Save files directly (overwrites existing files on disk)
         audio_file.save(audio_dest)
         lights_file.save(lights_dest)
 
-        # Load existing sacn-lightshow/config/playlist.json
         data = load_playlists_data()
         if "playlists" not in data or not isinstance(data["playlists"], dict):
             data["playlists"] = {}
@@ -388,7 +400,6 @@ def upload_show_files():
             "rds": Path(audio_name).stem.replace("_", "").title()
         }
 
-        # Update entries in selected playlists
         for pl_name in target_playlists:
             if pl_name not in data["playlists"]:
                 data["playlists"][pl_name] = []
@@ -396,19 +407,24 @@ def upload_show_files():
             playlist_items = data["playlists"][pl_name]
             updated = False
 
-            # Search for an existing entry matching audio or sequence filename to overwrite in-place
             for idx, item in enumerate(playlist_items):
                 if item.get("audio") == audio_name or item.get("sequence") == lights_name:
                     playlist_items[idx] = track_entry
                     updated = True
                     break
 
-            # Append as new track if no matching entry exists
             if not updated:
                 playlist_items.append(track_entry)
 
         with open(CONFIG_FILES["playlist"], "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+        # Notify main.py of playlist change
+        query_initializer_node(
+            "/api/config/reload",
+            method="POST",
+            payload={"config_type": "playlist"}
+        )
 
         return jsonify({
             "status": "success",
@@ -420,25 +436,21 @@ def upload_show_files():
     except Exception as e:
         return jsonify({"error": f"Failed to complete file upload operation: {str(e)}"}), 500
 
+
 ###############################################################################
 #                               Console Backend                               #
 ###############################################################################
 
-# Initialize sACN Sender Node
-sacn_sender = sacn.sACNsender(source_name="Web Console" , fps=30)
+sacn_sender = sacn.sACNsender(source_name="Web Console", fps=30)
 sacn_sender.start()
 
-# Active universe registration tracking
 active_universes = set()
 last_console_frame = 0.0
-
-# The console is a remote focus unit: when nobody has touched it for this long, stop sending so the last
-# look doesn't linger and reappear between shows. (Deactivating sends stream-terminated packets.)
 CONSOLE_IDLE_RELEASE_S = 600.0
 
 
 def release_console_outputs() -> list:
-    """Zero and deactivate every universe the console is driving. Returns the universes released."""
+    """Zero and deactivate every universe the console is driving."""
     released = sorted(active_universes)
     for universe in released:
         try:
@@ -446,7 +458,7 @@ def release_console_outputs() -> list:
         except Exception:
             pass
     if released:
-        gevent.sleep(0.1)  # let the sender thread push the zeros out first
+        gevent.sleep(0.1)
     for universe in released:
         try:
             sacn_sender.deactivate_output(universe)
@@ -469,19 +481,17 @@ gevent.spawn(_console_idle_watchdog)
 
 @app.route("/api/sacn/release", methods=["POST"])
 def sacn_release_handler():
-    """Stops all console output (zero + stream termination) so the console no longer holds anything."""
     return jsonify({"status": "released", "universes": release_console_outputs()}), 200
+
 
 @app.route("/api/sacn/stream", methods=["POST"])
 def sacn_stream_handler():
-    """Receives DMX frame from frontend parser and broadcasts sACN at Priority 50."""
     global last_console_frame
     last_console_frame = time.monotonic()
     payload = request.get_json() or {}
     priority = payload.get("priority", 50)
-    frame = payload.get("frame", {})  # Key format: "universe/address" -> dmxValue (0-255)
+    frame = payload.get("frame", {})
 
-    # Group frame levels by universe
     universe_buffers = {}
     for dmx_key, val in frame.items():
         try:
@@ -497,21 +507,20 @@ def sacn_stream_handler():
         except Exception:
             continue
 
-    # Transmit frames for each active universe
     for universe, dmx_data in universe_buffers.items():
         if universe not in active_universes:
             sacn_sender.activate_output(universe)
             sacn_sender[universe].multicast = True
             active_universes.add(universe)
         
-        # Transmission priority to 50
         sacn_sender[universe].priority = priority
         sacn_sender[universe].dmx_data = dmx_data
 
     return jsonify({"status": "transmitting", "priority": priority, "universes": list(universe_buffers.keys())}), 200
 
+
 # -------------------------------------------------------------------
-# SPA Routing (Serves production Vue build)
+# SPA Routing
 # -------------------------------------------------------------------
 @app.route("/")
 def serve_index():
@@ -529,6 +538,7 @@ def serve_static(path):
     elif (DIST_DIR / "index.html").exists():
         return send_from_directory(DIST_DIR, "index.html")
     return jsonify({"error": "Not found"}), 404
+
 
 if __name__ == "__main__":
     log.info("[Flask] Starting gevent WSGI server on port 5000...")

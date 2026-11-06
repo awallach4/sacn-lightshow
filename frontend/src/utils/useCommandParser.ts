@@ -25,7 +25,7 @@ export type ControlKey =
   | 'NEXT'
   | 'LAST'
   | 'ADDRESS'
-  | 'CHAN_CHECK'
+  | 'CHECK'
 export type DigitKey = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9'
 
 export type ConsoleKey = SyntaxKey | ControlKey | DigitKey | (string & {})
@@ -538,16 +538,16 @@ export function useCommandParser(): UseCommandParserReturn {
 
     // --- ADDRESS MODE EVALUATION ---
     if (cmd.startsWith('ADDRESS') || isAddressMode.value) {
-      if (cmd.includes('CHAN_CHECK')) {
+      if (cmd.includes('CHECK')) {
         let selectionPart = ''
         let levelPart = ''
 
         if (cmd.includes('AT')) {
           const atParts = cmd.replace('ADDRESS', '').split('AT')
           selectionPart = atParts[0] ?? ''
-          levelPart = (atParts[1] ?? '').split('CHAN_CHECK')[0] ?? ''
+          levelPart = (atParts[1] ?? '').split('CHECK')[0] ?? ''
         } else {
-          selectionPart = cmd.replace('ADDRESS', '').split('CHAN_CHECK')[0] ?? ''
+          selectionPart = cmd.replace('ADDRESS', '').split('CHECK')[0] ?? ''
         }
 
         const targets =
@@ -565,7 +565,7 @@ export function useCommandParser(): UseCommandParserReturn {
         isAddressMode.value = true
         isChanCheckMode.value = true
         executeAddressCheckStep(targetAddr)
-        commandText.value = `ADDRESS ${targetAddr} CHAN_CHECK`
+        commandText.value = `ADDRESS ${targetAddr} CHECK`
         commandError.value = false
         isCommandCompleted.value = true
         return
@@ -622,16 +622,16 @@ export function useCommandParser(): UseCommandParserReturn {
     }
 
     // --- CHANNEL CHECK SYNTAX EVALUATION ---
-    if (cmd.includes('CHAN_CHECK')) {
+    if (cmd.includes('CHECK')) {
       let selectionPart = ''
       let levelPart = ''
 
       if (cmd.includes('AT')) {
         const atParts = cmd.split('AT')
         selectionPart = atParts[0] ?? ''
-        levelPart = (atParts[1] ?? '').split('CHAN_CHECK')[0] ?? ''
+        levelPart = (atParts[1] ?? '').split('CHECK')[0] ?? ''
       } else {
-        selectionPart = cmd.split('CHAN_CHECK')[0] ?? ''
+        selectionPart = cmd.split('CHECK')[0] ?? ''
       }
 
       const targets =
@@ -648,7 +648,7 @@ export function useCommandParser(): UseCommandParserReturn {
 
       isChanCheckMode.value = true
       executeChanCheckStep(targetChan)
-      commandText.value = `${targetChan} CHAN_CHECK`
+      commandText.value = `${targetChan} CHECK`
       commandError.value = false
       isCommandCompleted.value = true
       return
@@ -828,8 +828,8 @@ export function useCommandParser(): UseCommandParserReturn {
       selectionPart = cleanStr.split('SNEAK')[0] ?? ''
     } else if (cleanStr.includes('REMDIM')) {
       selectionPart = cleanStr.split('REMDIM')[0] ?? ''
-    } else if (cleanStr.includes('CHAN_CHECK')) {
-      selectionPart = cleanStr.split('CHAN_CHECK')[0] ?? ''
+    } else if (cleanStr.includes('CHECK')) {
+      selectionPart = cleanStr.split('CHECK')[0] ?? ''
     }
 
     if (selectionPart.trim().length > 0) {
@@ -877,7 +877,7 @@ export function useCommandParser(): UseCommandParserReturn {
       key === 'OUT' ||
       key === 'SNEAK' ||
       key === 'REMDIM' ||
-      key === 'CHAN_CHECK'
+      key === 'CHECK'
 
     if (
       isAddressMode.value &&
@@ -936,7 +936,7 @@ export function useCommandParser(): UseCommandParserReturn {
           if (nextAddrNum < 1) nextAddrNum = 512
 
           executeAddressCheckStep(`${universe}/${nextAddrNum}`)
-          commandText.value = `ADDRESS ${universe}/${nextAddrNum} CHAN_CHECK`
+          commandText.value = `ADDRESS ${universe}/${nextAddrNum} CHECK`
           commandError.value = false
           isCommandCompleted.value = true
           return
@@ -957,7 +957,7 @@ export function useCommandParser(): UseCommandParserReturn {
 
         const nextChan = patchedChannels[nextIndex] ?? fallbackChan
         executeChanCheckStep(nextChan)
-        commandText.value = `${nextChan} CHAN_CHECK`
+        commandText.value = `${nextChan} CHECK`
         commandError.value = false
         isCommandCompleted.value = true
         return
@@ -1080,16 +1080,16 @@ export function useCommandParser(): UseCommandParserReturn {
 
     const line = commandText.value
 
-    if (key === 'CHAN_CHECK') {
+    if (key === 'CHECK') {
       if (isAddressMode.value || selectedAddresses.value.length > 0 || line.startsWith('ADDRESS')) {
-        commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'ADDRESS CHAN_CHECK '
+        commandText.value = line.length > 0 ? line + ' CHECK ' : 'ADDRESS CHECK '
         return
       }
 
       if (selectedAddresses.value.length > 0) sneakSelectedAddresses()
       isAddressMode.value = false
       selectedAddresses.value = []
-      commandText.value = line.length > 0 ? line + ' CHAN_CHECK ' : 'CHAN_CHECK '
+      commandText.value = line.length > 0 ? line + ' CHECK ' : 'CHECK '
       return
     }
 

@@ -3,7 +3,7 @@ import JSONEditor from '@/components/JSONEditor.vue'
 import type { FormError } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/runtime/composables/useToast.js'
 import { useSeoMeta } from '@unhead/vue'
-import { reactive, ref, onMounted, useTemplateRef } from 'vue'
+import { reactive, ref, onMounted, useTemplateRef, onUnmounted } from 'vue'
 
 const state = reactive<{
   audio: File | null
@@ -21,11 +21,34 @@ const isUploading = ref(false)
 const playlists = ref<string[]>([])
 const form = useTemplateRef('form')
 
+const isBackendConnected = ref<boolean>(true)
+const system_state = ref<string>('')
+
 // Reset form helper
 const resetForm = () => {
   state.audio = null
   state.lights = null
   state.playlist = []
+}
+
+let pollInterval: ReturnType<typeof setInterval> | null = null
+
+// Poll backend telemetry quietly
+const fetchTelemetry = async () => {
+  try {
+    const res = await fetch('/api/telemetry')
+    if (!res.ok) {
+      isBackendConnected.value = false
+      return
+    }
+    const data = await res.json()
+
+    system_state.value = data.system_state
+    isBackendConnected.value = true
+  } catch {
+    // Quietly catch network drops to avoid flooding the console
+    isBackendConnected.value = false
+  }
 }
 
 type Schema = typeof state
@@ -66,6 +89,15 @@ const loadPlaylistConfig = async () => {
 // Form Submit Handler with Loading State
 const onSubmit = async () => {
   isUploading.value = true
+
+  if (system_state.value !== 'OFF') {
+    toast.add({
+      title: 'Error',
+      description: 'Cannot upload files while show is running.',
+      color: 'error',
+    })
+    return
+  }
 
   const formData = new FormData()
   const validAudioExtensions = ['.mp3', '.wav', '.aac', '.aif', '.ogg', '.flac']
@@ -134,7 +166,13 @@ const onError = async () => {
 }
 
 onMounted(() => {
+  fetchTelemetry()
   loadPlaylistConfig()
+  pollInterval = setInterval(fetchTelemetry, 1000)
+})
+
+onUnmounted(() => {
+  if (pollInterval) clearInterval(pollInterval)
 })
 
 useSeoMeta({
@@ -152,6 +190,7 @@ useSeoMeta({
       :validate="validate"
       :state="state"
       class="space-y-4 max-w-lg mx-auto mb-24"
+      :disabled="system_state !== 'OFF' || isBackendConnected === false"
       @submit="onSubmit"
       @error="onError"
     >
@@ -195,7 +234,7 @@ useSeoMeta({
           type="submit"
           class="text-neutral-900"
           :loading="isUploading"
-          :disabled="isUploading"
+          :disabled="isUploading || system_state !== 'OFF' || isBackendConnected === false"
         >
           Submit
         </UButton>
@@ -203,13 +242,18 @@ useSeoMeta({
         <UButton
           color="error"
           class="text-neutral-900"
-          :disabled="isUploading"
+          :disabled="isUploading || system_state !== 'OFF' || isBackendConnected === false"
           @click="(form?.clear(), resetForm())"
         >
           Clear
         </UButton>
 
-        <UButton label="Edit playlist.json" color="neutral" @click="editing = true" />
+        <UButton
+          label="Edit playlist.json"
+          color="neutral"
+          :disabled="system_state !== 'OFF' || isBackendConnected === false"
+          @click="editing = true"
+        />
       </div>
 
       <JSONEditor
