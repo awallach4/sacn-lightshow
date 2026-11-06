@@ -83,7 +83,7 @@ class InitializerNode:
                 with open(self.config_path, "r") as f:
                     return json.load(f)
             except Exception as e:
-                self.log.warning(f"[INIT] Failed to read {self.config_path}: {e}", sys.stderr)
+                self.log.warning(f"[INIT] Failed to read {self.config_path}: {e}")
         
         # Fallback schema matching main_config.json structure
         return {
@@ -191,7 +191,7 @@ class InitializerNode:
 
         if not patch_path.exists():
             fallback_universe = self.config.get("system", {}).get("network", {}).get("sacn_universe", 11)
-            self.log.warning(f"[INIT] Patch config not found at {patch_path}. Defaulting Universe {fallback_universe} to all 512 slots.", sys.stderr)
+            self.log.warning(f"[INIT] Patch config not found at {patch_path}. Defaulting Universe {fallback_universe} to all 512 slots.")
             return {fallback_universe: [255] * 512}
 
         try:
@@ -230,7 +230,7 @@ class InitializerNode:
 
         except Exception as e:
             fallback_universe = self.config.get("system", {}).get("network", {}).get("sacn_universe", 11)
-            self.log.error(f"[INIT] Failed to parse {patch_path}: {e}. Defaulting Universe {fallback_universe} to all 512 slots.", sys.stderr)
+            self.log.error(f"[INIT] Failed to parse {patch_path}: {e}. Defaulting Universe {fallback_universe} to all 512 slots.")
             return {fallback_universe: [255] * 512}
 
     def get_process_status(self) -> dict:
@@ -310,9 +310,9 @@ class InitializerNode:
             sender.stop()
 
         except ImportError:
-            self.log.warning("[INIT] sACN package not installed. Skipping DMX blackout frame.", sys.stderr)
+            self.log.warning("[INIT] sACN package not installed. Skipping DMX blackout frame.")
         except Exception as e:
-            self.log.error(f"[INIT] Failed to send blackout sACN: {e}", sys.stderr)
+            self.log.error(f"[INIT] Failed to send blackout sACN: {e}")
 
     def trigger_all_on(self, level: int = 255):
         """Drives ONLY patched channels on ALL universes defined in patch.json to full level."""
@@ -355,7 +355,7 @@ class InitializerNode:
                 sender.stop()
                 
             except Exception as err:
-                self.log.error(f"[INIT] All ON macro exception: {err}", sys.stderr)
+                self.log.error(f"[INIT] All ON macro exception: {err}")
 
         self.macro_thread = threading.Thread(target=_on_loop, daemon=True)
         self.macro_thread.start()

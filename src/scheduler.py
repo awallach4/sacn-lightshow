@@ -30,7 +30,7 @@ def query_initializer_api(endpoint: str, payload: dict, log: Logger) -> bool:
         with urllib.request.urlopen(req, timeout=3.0) as resp:
             return resp.status == 200
     except Exception as e:
-        log.error(f"[SCHEDULER] Failed to send IPC command to {endpoint}: {e}", sys.stderr)
+        log.error(f"[SCHEDULER] Failed to send IPC command to {endpoint}: {e}")
         return False
 
 
@@ -66,9 +66,9 @@ class SchedulerNode:
                 with open(path, "r") as f:
                     return json.load(f)
             except Exception as e:
-                self.log.warning(f"[SCHEDULER] Failed to read {path}: {e}", sys.stderr)
+                self.log.warning(f"[SCHEDULER] Failed to read {path}: {e}")
         else:
-            self.log.warning(f"[SCHEDULER] File not found: {path}", sys.stderr)
+            self.log.warning(f"[SCHEDULER] File not found: {path}")
         return {}
 
     def run(self):
@@ -138,7 +138,7 @@ class SchedulerNode:
                             self.log.info(f"[SCHEDULER] Command successfully dispatched for {event_id}.")
 
             except Exception as e:
-                self.log.error(f"[SCHEDULER] Exception in main loop: {e}", sys.stderr)
+                self.log.error(f"[SCHEDULER] Exception in main loop: {e}")
 
             # Sleep 5 seconds to ensure we hit the 1-minute window reliably
             time.sleep(5.0)

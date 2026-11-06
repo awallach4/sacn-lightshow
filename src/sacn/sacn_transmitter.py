@@ -338,7 +338,7 @@ def play(args: argparse.Namespace) -> None:
 
     finally:
         if skipped:
-            log.warning(f"Skipped {skipped} frame(s) to stay in sync with the clock.", sys.stderr)
+            log.warning(f"Skipped {skipped} frame(s) to stay in sync with the clock.")
         try:
             # Blackout: push zeros first, then send stream-terminated packets.
             for universe in active_universes:
@@ -373,7 +373,7 @@ def main() -> int:
     try:
         play(args)
     except (OSError, ValueError, RuntimeError) as exc:
-        log.error(f"Error: {exc}", sys.stderr)
+        log.error(f"Error: {exc}")
         return 1
     except KeyboardInterrupt:
         pass

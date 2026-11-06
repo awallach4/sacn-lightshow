@@ -83,7 +83,7 @@ def load_system_configs(args):
     abs_main_path = Path(args.config).resolve()
 
     if not abs_main_path.is_file():
-        log.error(f"[SHOW] Main config file not found: {abs_main_path}", sys.stderr)
+        log.error(f"[SHOW] Main config file not found: {abs_main_path}")
         sys.exit(1)
 
     with open(abs_main_path, "r") as f:
@@ -97,7 +97,7 @@ def load_system_configs(args):
     playlist_path = (PROJECT_ROOT / raw_playlist_path.lstrip("/\\")).resolve()
 
     if not playlist_path.is_file():
-        log.error(f"[SHOW] Playlist file not found: {playlist_path}", sys.stderr)
+        log.error(f"[SHOW] Playlist file not found: {playlist_path}")
         sys.exit(1)
 
     with open(playlist_path, "r") as f:
@@ -107,13 +107,13 @@ def load_system_configs(args):
 
     if isinstance(playlist_file_data, dict):
         if target_playlist_name not in playlist_file_data['playlists'].keys():
-            log.error(f"[SHOW] Playlist key '{target_playlist_name}' not found in {playlist_path}", sys.stderr)
+            log.error(f"[SHOW] Playlist key '{target_playlist_name}' not found in {playlist_path}")
             sys.exit(1)
         playlist_data = playlist_file_data['playlists'][target_playlist_name]
     elif isinstance(playlist_file_data, list):
         playlist_data = playlist_file_data
     else:
-        log.error(f"[SHOW] Invalid format in playlist file: {playlist_path}", sys.stderr)
+        log.error(f"[SHOW] Invalid format in playlist file: {playlist_path}")
         sys.exit(1)
 
     # Resolve relative audio and sequence paths inside playlist items
@@ -173,7 +173,7 @@ def send_sacn_blackout(universe=11, priority=100):
         sender.deactivate_output(universe)
         sender.stop()
     except Exception as e:
-        log.warning(f"[SHOW] Could not send sACN blackout frame: {e}", sys.stderr)
+        log.warning(f"[SHOW] Could not send sACN blackout frame: {e}")
 
 
 def terminate_all_children():
@@ -197,7 +197,7 @@ def terminate_all_children():
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], 
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
-                log.error(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}", sys.stderr)
+                log.error(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}")
 
     active_processes.clear()
 
@@ -211,7 +211,7 @@ def terminate_all_children():
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(fm_carrier_proc.pid)], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
-            log.error(f"[SHOW CONTROL] Error killing FM carrier: {e}", sys.stderr)
+            log.error(f"[SHOW CONTROL] Error killing FM carrier: {e}")
         fm_carrier_proc = None
 
 
@@ -257,7 +257,7 @@ def emergency_panic_latch(signum=None, frame=None):
         with urllib.request.urlopen(req, timeout=1.0):
             pass
     except Exception as e:
-        log.error(f"[EMERGENCY] Failed to notify Initializer Node: {e}", sys.stderr)
+        log.error(f"[EMERGENCY] Failed to notify Initializer Node: {e}")
 
     cleanup_and_exit(signum, frame)
 
@@ -384,7 +384,7 @@ def run_track(track_idx, playlist):
     total_tracks = len(playlist)
     
     if not (0 <= track_idx < total_tracks):
-        log.error(f"[SHOW] Track index {track_idx} out of range.", sys.stderr)
+        log.error(f"[SHOW] Track index {track_idx} out of range.")
         return False
 
     current_track = playlist[track_idx]
@@ -401,10 +401,10 @@ def run_track(track_idx, playlist):
     notify_current_track(now_playing=now_playing_title, next_up=next_up_title)
 
     if not os.path.isfile(audio_path):
-        log.error(f"[SHOW] Audio file missing: {audio_path}", sys.stderr)
+        log.error(f"[SHOW] Audio file missing: {audio_path}")
         return False
     if not os.path.isfile(sequence_path):
-        log.error(f"[SHOW] Sequence file missing: {sequence_path}", sys.stderr)
+        log.error(f"[SHOW] Sequence file missing: {sequence_path}")
         return False
 
     log.info(f"\n==================================================")
@@ -492,21 +492,21 @@ def run_track(track_idx, playlist):
                 if now > max(hard_deadline, first_exit + end_grace_s):
                     laggard = "sacn" if audio_done else "audio"
                     log.warning(f"[SHOW] {laggard} worker still running well past the expected end of the track; "
-                          f"terminating it.", sys.stderr)
+                          f"terminating it.")
                     break
             time.sleep(0.05)
 
         for name, proc in (("audio", audio_proc), ("sacn", sacn_proc)):
             if proc.poll() not in (None, 0):
-                log.warning(f"[SHOW] {name} worker exited with code {proc.returncode}", sys.stderr)
+                log.warning(f"[SHOW] {name} worker exited with code {proc.returncode}")
 
         log.info(f"[SHOW] Track '{now_playing_title}' completed cleanly")
 
     except KeyboardInterrupt:
-        log.warning("\n[SHOW] Track execution aborted by signal.", sys.stderr)
+        log.warning("\n[SHOW] Track execution aborted by signal.")
         raise
     except Exception as e:
-        log.error(f"[SHOW] Exception during track playback: {e}", sys.stderr)
+        log.error(f"[SHOW] Exception during track playback: {e}")
         return False
     finally:
         for proc in processes:
@@ -528,7 +528,7 @@ def run_track(track_idx, playlist):
         log.info("[SHOW] Holding inter-track blackout head...")
         time.sleep(inter_track_delay)
     except Exception as e:
-        log.warning(f"[SHOW] Non-fatal error during inter-track delay: {e}", sys.stderr)
+        log.warning(f"[SHOW] Non-fatal error during inter-track delay: {e}")
 
     return True  # Proceed to track idx + 1
 
@@ -583,7 +583,7 @@ def main():
                 break
             success = run_track(idx, playlist)      
             if not success:
-                log.info(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.", sys.stderr)
+                log.info(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.")
                 break
         else:
             log.info("[SHOW CONTROL] Completed all tracks in playlist successfully.")            

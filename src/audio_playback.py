@@ -95,11 +95,11 @@ def parse_args():
 
 def validate_environment(audio_file, freq):
     if not os.path.isfile(audio_file):
-        log.error(f"[AUDIO] Audio file not found: {audio_file}", sys.stderr)
+        log.error(f"[AUDIO] Audio file not found: {audio_file}")
         sys.exit(1)
 
     if not (87.5 <= freq <= 108.0):
-        log.error(f"[AUDIO] Frequency {freq} MHz is outside the standard FM broadcast band (87.5 - 108.0 MHz)", sys.stderr)
+        log.error(f"[AUDIO] Frequency {freq} MHz is outside the standard FM broadcast band (87.5 - 108.0 MHz)")
         sys.exit(1)
 
 
@@ -187,12 +187,11 @@ def play_linux_speakers_only(abs_audio_path, speaker_offset):
         try:
             proc = subprocess.Popen(["play", "-q", abs_audio_path], stdout=subprocess.DEVNULL)
         except FileNotFoundError:
-            log.warning("[AUDIO] 'play' (from the sox package) is not installed; no audio will be played.",
-                  sys.stderr)
+            log.warning("[AUDIO] 'play' (from the sox package) is not installed; no audio will be played.")
             return
         rc = proc.wait()
         if rc:
-            log.warning(f"[AUDIO] play exited with code {rc} (no sound device?); audio did not play.", sys.stderr)
+            log.warning(f"[AUDIO] play exited with code {rc} (no sound device?); audio did not play.")
     except KeyboardInterrupt:
         log.warning("\n[AUDIO] Playback interrupted. Stopping speaker playback...")
     finally:
@@ -209,7 +208,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, 
             if not stat.S_ISFIFO(os.stat(FIFO_PATH).st_mode):
                 log.error(f"[AUDIO] {FIFO_PATH} exists but is NOT a named pipe (FIFO). sox would just write the "
                       f"audio into a plain file and nothing would be broadcast. Remove it "
-                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.", sys.stderr)
+                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.")
                 sys.exit(1)
             log.info(f"[AUDIO] Streaming to active FM carrier pipe ({FIFO_PATH})...")
             sink = FIFO_PATH
@@ -276,7 +275,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, 
 def play_audio(audio_file, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset, no_fm=False):
     abs_audio_path = os.path.abspath(audio_file)
     if not os.path.isfile(abs_audio_path):
-        log.error(f"[AUDIO] Audio file not found: {abs_audio_path}", sys.stderr)
+        log.error(f"[AUDIO] Audio file not found: {abs_audio_path}")
         sys.exit(1)
 
     log.info(f"[AUDIO] Initializing Audio FM Node")

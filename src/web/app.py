@@ -24,11 +24,11 @@ log = get_node_logger("web", load_log_level())
 
 def _fatal_import(exc):
     """Explain a missing/broken dependency in terms of the exact interpreter that failed."""
-    log.error(f"[Flask] FATAL: could not import a required package: {exc}", sys.stderr)
-    log.error(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})", sys.stderr)
-    log.error(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt", sys.stderr)
+    log.error(f"[Flask] FATAL: could not import a required package: {exc}")
+    log.error(f"[Flask]   Python in use : {sys.executable} ({sys.version.split()[0]})")
+    log.error(f"[Flask]   Fix           : {sys.executable} -m pip install -r requirements.txt")
     log.error("[Flask]   (Ubuntu 23.04+ blocks system-wide pip installs: use a venv, and start main.py with that "
-          "venv's python, also under sudo.)", sys.stderr)
+          "venv's python, also under sudo.)")
     sys.exit(1)
 
 
