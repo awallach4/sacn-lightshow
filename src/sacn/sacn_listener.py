@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Receive sACN data and drive GPIO devices from every universe in patch.json."""
+"""Receive sACN data and drive GPIO devices from every universe in patch.json using lgpio."""
 
 import argparse
 import json
@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from logger_setup import get_node_logger, setup_global_exception_handler
 
+
 def load_log_level() -> str:
     try:
         if CONFIG_FILE.exists():
@@ -25,21 +26,53 @@ def load_log_level() -> str:
         pass
     return "INFO"
 
+
 # Initialize node logger
 log = get_node_logger("sacn_listener", load_log_level())
 setup_global_exception_handler(log)
 
-# Keep the project's existing GPIO/HAL import convention.
-if sys.platform == "win32":
-    import RPi.GPIO as GPIO
-    log.info("[HAL] Running on Windows: Loaded local ANSI GPIO Emulator.")
-else:
+# Dynamic HAL import: Use lgpio on Linux/Raspberry Pi; fallback to dummy mock on non-Linux
+IS_LINUX = sys.platform.startswith("linux")
+
+if IS_LINUX:
     try:
-        import RPi.GPIO as GPIO
-        log.info("[HAL] Running on Linux/Raspberry Pi: Loaded native RPi.GPIO driver.")
+        import lgpio
+        log.info("[HAL] Running on Linux/Raspberry Pi: Loaded native lgpio driver.")
     except ImportError:
-        import RPi.GPIO as GPIO
-        log.info("[HAL] Linux host without native GPIO driver: Loaded local GPIO emulator fallback.")
+        lgpio = None
+        log.warn("[HAL] Linux host without native lgpio package. Ensure python3-lgpio is installed.")
+else:
+    lgpio = None
+    log.info("[HAL] Running on Non-Linux host: Mock GPIO fallback active.")
+
+
+class MockGPIOChip:
+    """Fallback dummy handle for local development and non-Linux OS testing."""
+    def __init__(self, chip=0):
+        self.chip = chip
+
+    def gpio_claim_output(self, pin, level=0):
+        pass
+
+    def gpio_write(self, pin, level):
+        pass
+
+    def tx_pwm(self, pin, frequency, duty_cycle):
+        pass
+
+    def gpiochip_close(self):
+        pass
+
+
+def open_gpio_chip(chip_num: int = 0):
+    """Open a handle to the primary gpiochip or return a mock chip."""
+    if IS_LINUX and lgpio is not None:
+        try:
+            return lgpio.gpiochip_open(chip_num)
+        except Exception as e:
+            log.error(f"[HAL] Failed to open gpiochip{chip_num}: {e}")
+            raise
+    return MockGPIOChip(chip_num)
 
 
 def read_patch(patch_arg: str) -> dict:
@@ -179,46 +212,68 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_drivers(patch_map: dict) -> dict:
-    """Configure each GPIO once; index drivers by universe and DMX address."""
-    GPIO.setmode(GPIO.BCM)
+def create_drivers(chip, patch_map: dict) -> dict:
+    """Configure GPIO outputs on the lgpio chip handle; index drivers by universe and address."""
     drivers = {}
     try:
         for universe, channels in patch_map.items():
             drivers[universe] = {}
             for address, config in channels.items():
                 pin = config["pin"]
-                GPIO.setup(pin, GPIO.OUT)
+                
+                # Claim pin as output, initialized to LOW (0)
+                if IS_LINUX and lgpio is not None:
+                    lgpio.gpio_claim_output(chip, pin, 0)
+                else:
+                    chip.gpio_claim_output(pin, 0)
 
                 if config["nondim"]:
-                    GPIO.output(pin, GPIO.LOW)
                     driver = {"type": "nondim", "pin": pin}
                 else:
-                    pwm = GPIO.PWM(pin, 100)
-                    pwm.start(0.0)
-                    driver = {"type": "pwm", "pin": pin, "driver": pwm}
+                    # Initialize 100Hz PWM at 0.0% duty cycle
+                    if IS_LINUX and lgpio is not None:
+                        lgpio.tx_pwm(chip, pin, 100, 0.0)
+                    else:
+                        chip.tx_pwm(pin, 100, 0.0)
+                    driver = {"type": "pwm", "pin": pin}
 
                 drivers[universe][address] = driver
-    except Exception:
-        for universe_drivers in drivers.values():
-            for driver in universe_drivers.values():
-                if driver["type"] == "pwm":
-                    driver["driver"].stop()
-        GPIO.cleanup()
+    except Exception as exc:
+        log.error(f"[HAL] Error setting up GPIO pins: {exc}")
+        cleanup_drivers(chip, drivers)
         raise
     return drivers
 
 
-def set_universe_off(universe_drivers: dict):
-    """Set all GPIO outputs belonging to one unavailable universe to zero."""
+def set_universe_off(chip, universe_drivers: dict):
+    """Set all GPIO outputs belonging to an unavailable universe to zero."""
     for driver in universe_drivers.values():
+        pin = driver["pin"]
         if driver["type"] == "nondim":
-            GPIO.output(driver["pin"], GPIO.LOW)
+            if IS_LINUX and lgpio is not None:
+                lgpio.gpio_write(chip, pin, 0)
+            else:
+                chip.gpio_write(pin, 0)
         else:
-            driver["driver"].ChangeDutyCycle(0.0)
+            if IS_LINUX and lgpio is not None:
+                lgpio.tx_pwm(chip, pin, 100, 0.0)
+            else:
+                chip.tx_pwm(pin, 0.0)
 
 
-def make_universe_callback(universe: int, universe_drivers: dict):
+def cleanup_drivers(chip, drivers: dict):
+    """Set all outputs off and close the lgpio chip handle."""
+    for universe_drivers in drivers.values():
+        set_universe_off(chip, universe_drivers)
+    
+    if IS_LINUX and lgpio is not None:
+        try:
+            lgpio.gpiochip_close(chip)
+        except Exception:
+            pass
+
+
+def make_universe_callback(chip, universe: int, universe_drivers: dict):
     """Create a callback bound to one universe's configured GPIO channels."""
     def callback(packet):
         dmx_data = packet.dmxData
@@ -228,10 +283,21 @@ def make_universe_callback(universe: int, universe_drivers: dict):
                 continue
 
             level = dmx_data[index]
+            pin = driver["pin"]
+            
             if driver["type"] == "nondim":
-                GPIO.output(driver["pin"], GPIO.HIGH if level >= 128 else GPIO.LOW)
+                state = 1 if level >= 128 else 0
+                if IS_LINUX and lgpio is not None:
+                    lgpio.gpio_write(chip, pin, state)
+                else:
+                    chip.gpio_write(pin, state)
             else:
-                driver["driver"].ChangeDutyCycle((level / 255.0) * 100.0)
+                # DMX 0-255 mapped to 0.0% - 100.0% PWM duty cycle
+                duty_cycle = (level / 255.0) * 100.0
+                if IS_LINUX and lgpio is not None:
+                    lgpio.tx_pwm(chip, pin, 100, duty_cycle)
+                else:
+                    chip.tx_pwm(pin, 100, duty_cycle)
 
     return callback
 
@@ -243,20 +309,21 @@ def main():
     except ValueError as exc:
         raise SystemExit(f"[Error] {exc}") from exc
 
-    drivers = create_drivers(patch_map)
+    chip = open_gpio_chip(0)
+    drivers = create_drivers(chip, patch_map)
     receiver = sacn.sACNreceiver()
     joined_universes = []
 
     # Register one packet callback for every universe containing GPIO channels.
     for universe, universe_drivers in drivers.items():
-        callback = make_universe_callback(universe, universe_drivers)
+        callback = make_universe_callback(chip, universe, universe_drivers)
         receiver.listen_on("universe", universe=universe)(callback)
 
     @receiver.listen_on("availability")
     def availability_callback(universe, changed):
         if changed in ("timeout", "stream_terminated") and universe in drivers:
             log.info(f"[sACN] Universe {universe} {changed}; setting its GPIO outputs off.")
-            set_universe_off(drivers[universe])
+            set_universe_off(chip, drivers[universe])
 
     try:
         receiver.start()
@@ -285,11 +352,7 @@ def main():
                 receiver.leave_multicast(universe)
             receiver.stop()
         finally:
-            for universe_drivers in drivers.values():
-                for driver in universe_drivers.values():
-                    if driver["type"] == "pwm":
-                        driver["driver"].stop()
-            GPIO.cleanup()
+            cleanup_drivers(chip, drivers)
         log.info("sACN GPIO listener stopped.")
 
 
