@@ -8,7 +8,7 @@ import { reactive, ref, onMounted, useTemplateRef } from 'vue'
 const state = reactive<{
   audio: File | null
   lights: File | null
-  playlist: string[] | string
+  playlist: string[]
 }>({
   audio: null,
   lights: null,

@@ -63,7 +63,7 @@ except ImportError as _exc:
 
 # Resolve base directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DIST_DIR = PROJECT_ROOT / "src" / "web" / "dist"
+DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
 
 # Windows IPC fallback path vs Linux /dev/shm shared memory
 IS_WINDOWS = platform.system() == "Windows"
@@ -130,28 +130,6 @@ def query_initializer_node(endpoint: str, method: str = "GET", payload: dict = N
         return err_body, e.code
     except Exception as e:
         return {"error": f"Initializer Node unreachable: {str(e)}"}, 503
-
-
-# -------------------------------------------------------------------
-# SPA Routing (Serves production Vue build)
-# -------------------------------------------------------------------
-@app.route("/")
-def serve_index():
-    if (DIST_DIR / "index.html").exists():
-        return send_from_directory(DIST_DIR, "index.html")
-    return jsonify({"status": "API active", "note": "Vue dist build not found. Run Vite dev server."}), 200
-
-
-@app.route("/<path:path>")
-def serve_static(path):
-    if path.startswith("api/"):
-        return jsonify({"error": f"Unknown API endpoint '/{path}'"}), 404
-    if (DIST_DIR / path).exists():
-        return send_from_directory(DIST_DIR, path)
-    elif (DIST_DIR / "index.html").exists():
-        return send_from_directory(DIST_DIR, "index.html")
-    return jsonify({"error": "Not found"}), 404
-
 
 # -------------------------------------------------------------------
 # Telemetry Endpoint (Host Resource Metrics & Initializer Process States)
@@ -531,6 +509,26 @@ def sacn_stream_handler():
         sacn_sender[universe].dmx_data = dmx_data
 
     return jsonify({"status": "transmitting", "priority": priority, "universes": list(universe_buffers.keys())}), 200
+
+# -------------------------------------------------------------------
+# SPA Routing (Serves production Vue build)
+# -------------------------------------------------------------------
+@app.route("/")
+def serve_index():
+    if (DIST_DIR / "index.html").exists():
+        return send_from_directory(DIST_DIR, "index.html")
+    return jsonify({"status": "API active", "note": "Vue dist build not found. Run Vite dev server."}), 200
+
+
+@app.route("/<path:path>")
+def serve_static(path):
+    if path.startswith("api/"):
+        return jsonify({"error": f"Unknown API endpoint '/{path}'"}), 404
+    if (DIST_DIR / path).exists():
+        return send_from_directory(DIST_DIR, path)
+    elif (DIST_DIR / "index.html").exists():
+        return send_from_directory(DIST_DIR, "index.html")
+    return jsonify({"error": "Not found"}), 404
 
 if __name__ == "__main__":
     log.info("[Flask] Starting gevent WSGI server on port 5000...")

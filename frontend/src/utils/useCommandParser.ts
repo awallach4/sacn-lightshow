@@ -81,9 +81,6 @@ let lastFullClickTime = 0
 
 const toast = useToast()
 
-// Active patch schema cache
-const patchConfig = ref<PatchConfig | null>(null)
-
 // --- COMPOSABLE ---
 
 export function useCommandParser(): UseCommandParserReturn {

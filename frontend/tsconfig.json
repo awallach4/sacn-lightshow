@@ -1,12 +1,4 @@
 {
   "files": [],
-  "references": [
-    {
-      "path": "./tsconfig.node.json"
-    },
-    {
-      "path": "./tsconfig.app.json"
-    }
-  ],
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "auto-imports.d.ts", "components.d.ts"]
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.app.json" }]
 }
