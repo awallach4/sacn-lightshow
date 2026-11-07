@@ -336,7 +336,24 @@ def save_json_config(config_type):
 
         os.replace(temp_file, target_file)
 
-        # Notify main.py Initializer Node via IPC to restart targeted worker node(s)
+        # Full system stack reload must be deferred to prevent app.py process teardown mid-request
+        if config_type == "main_config":
+            def _async_ipc_reload():
+                gevent.sleep(0.2)  # Give app.py time to flush 200 OK to browser
+                query_initializer_node(
+                    "/api/config/reload",
+                    method="POST",
+                    payload={"config_type": "main_config"}
+                )
+
+            gevent.spawn(_async_ipc_reload)
+
+            return jsonify({
+                "status": "success",
+                "message": "main_config.json saved. Full system process stack reloading..."
+            }), 200
+
+        # Standard synchronous IPC reload for child nodes (scheduler, patch, playlist)
         res_body, status_code = query_initializer_node(
             "/api/config/reload",
             method="POST",
