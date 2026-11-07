@@ -231,7 +231,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, 
             "sox", "-q",
             "--buffer", "1024",
             abs_audio_path,
-            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", out_type, sink,
+            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw", "-",
             "remix", "1,2",
             "gain", "-1"
         ]

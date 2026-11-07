@@ -294,60 +294,39 @@ def streaming_wav_header(sample_rate=22050, channels=1, bits=16):
 
 
 def init_persistent_fm_carrier():
-    """Creates the FIFO pipe and launches a persistent pi_fm_rds fed from it."""
-    global fm_carrier_proc, sys_config, dummy_fifo_writer
+    """Launches pi_fm_rds accepting raw PCM streaming over stdin."""
+    global fm_carrier_proc, sys_config
 
     broadcast_cfg = sys_config.get("broadcast", {})
     freq = broadcast_cfg.get("fm_frequency", 90.3)
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
     rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
-    fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
-    pi_fm_rds_path = broadcast_cfg.get("pi_fm_rds_path", "/usr/local/bin/pi_fm_rds")
 
     if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
         return
 
-    # 1. Always start from a fresh FIFO so no stale bytes (or stale reader) from a previous run survive.
-    try:
-        os.remove(fifo_path)
-    except FileNotFoundError:
-        pass
-    os.mkfifo(fifo_path)
-
-    # 2. Hold the FIFO open read+write. On Linux O_RDWR on a FIFO never blocks, and because a writer is
-    #    always present, pi_fm_rds never sees EOF between tracks. (The old O_WRONLY|O_NONBLOCK open
-    #    failed with ENXIO, because no reader existed yet.) Then write the one-time WAV header.
-    try:
-        fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
-        dummy_fifo_writer = os.fdopen(fifo_fd, 'wb', buffering=0)
-        dummy_fifo_writer.write(streaming_wav_header())
-    except Exception as e:
-        log.error(f"[INIT] Could not prepare the FM FIFO {fifo_path}: {e}")
-        return
-
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
-
+    
     fm_cmd = [
-        pi_fm_rds_path,
+        "/usr/local/bin/pi_fm_rds",
         "-freq", str(freq),
-        "-audio", fifo_path,
+        "-audio", "-",
         "-ps", ps_name,
         "-rt", rt_text
     ]
 
-    fm_log_file = open("/tmp/pi_fm_rds.log", "w")
+    fm_log_file = open("logs/pi_fm_rds.log", "w")
 
+    # Pass a persistent pipe so stdin remains open across track changes
     fm_carrier_proc = subprocess.Popen(
         fm_cmd,
-        stdout=fm_log_file,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=fm_log_file,
         start_new_session=True
     )
-
+    
     time.sleep(0.5)
-
-    if fm_carrier_proc.poll() is not None:
-        log.error(f"[INIT] pi_fm_rds exited immediately (code {fm_carrier_proc.returncode}): {_fm_log_tail()}")
 
 
 def _fm_log_tail(max_chars=300):

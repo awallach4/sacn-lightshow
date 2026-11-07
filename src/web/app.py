@@ -235,13 +235,21 @@ def host_control(command):
     if cmd not in ["reboot", "shutdown"]:
         return jsonify({"error": "Invalid host command. Options: ['reboot', 'shutdown']"}), 400
 
-    res_body, status_code = query_initializer_node(
-        "/api/host",
-        method="POST",
-        payload={"action": cmd}
-    )
-    return jsonify(res_body), status_code
+    # Full system stack reload must be deferred to prevent app.py process teardown mid-request
+    def _async_ipc_reload():
+        gevent.sleep(0.2)  # Give app.py time to flush 200 OK to browser
+        query_initializer_node(
+            "/api/host",
+            method="POST",
+            payload={"action": cmd}
+        )
 
+    gevent.spawn(_async_ipc_reload)
+
+    return jsonify({
+        "status": "success",
+        "message": "main_config.json saved. Full system process stack reloading..."
+    }), 200
 
 ###############################################################################
 #                          Config & Playlist Backend                          #
