@@ -41,6 +41,9 @@ def load_log_level() -> str:
 log = get_node_logger("audio", load_log_level())
 setup_global_exception_handler(log)
 
+current_audio_proc = None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Audio Playback and FM Transmitter Controller Node"
@@ -154,6 +157,18 @@ def signal_ready_and_get_t0():
     return float(line) if line else time.monotonic()  # standalone run: start immediately
 
 
+def stop_audio():
+    """Stops active SoX audio playback."""
+    global current_audio_proc
+    if current_audio_proc and current_audio_proc.poll() is None:
+        try:
+            current_audio_proc.terminate()
+            current_audio_proc.wait(timeout=1.0)
+        except Exception:
+            current_audio_proc.kill()
+    current_audio_proc = None
+
+
 def play_windows(abs_audio_path, offset):
     import pygame  # only needed here, so the Pi doesn't require pygame
 
@@ -199,102 +214,68 @@ def play_linux_speakers_only(abs_audio_path, speaker_offset):
             proc.terminate()
 
 
-def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset):
-    signal.signal(signal.SIGTERM, _raise_interrupt)  # let `finally` reap sox/play/pi_fm_rds
-    processes = []
+def play_linux(audio_file_path, offset=0.0):
+    """Streams an audio file into the persistent pi_fm_rds FIFO pipe synchronized to T0."""
+    global current_audio_proc
+
+    clean_path = str(audio_file_path).strip().rstrip('\r\n')
+    abs_audio_path = os.path.abspath(clean_path)
+
+    log.info(f"[AUDIO] Raw path repr: {repr(audio_file_path)}")
+    log.info(f"[AUDIO] Resolved path: {abs_audio_path}")
+    if not os.path.exists(abs_audio_path):
+        log.error(f"[AUDIO] Audio file does not exist: {abs_audio_path}")
+        return
+
+    stop_audio()
+
+    duration = audio_duration_s(abs_audio_path)
+
+    sox_cmd = [
+        "sox", "-q",
+        "--buffer", "256",
+        abs_audio_path,
+        "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "au", FIFO_PATH,
+        "remix", "1,2",
+        "gain", "-1"
+    ]
+
+    log_fd = os.open("/tmp/sox_playback.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+
+    # Handshake with show_control to receive T0 start time
+    t0 = signal_ready_and_get_t0()
+    sleep_until(t0 + offset)
+
+    started_at = time.monotonic()
+    log.info(f"[AUDIO] Streaming track via SoX to {FIFO_PATH}: {abs_audio_path}")
+
     try:
-        fm_proc = None
-        if os.path.exists(FIFO_PATH):
-            if not stat.S_ISFIFO(os.stat(FIFO_PATH).st_mode):
-                log.error(f"[AUDIO] {FIFO_PATH} exists but is NOT a named pipe (FIFO). sox would just write the "
-                      f"audio into a plain file and nothing would be broadcast. Remove it "
-                      f"(rm {FIFO_PATH}) and restart so the FM carrier can recreate it.")
-                sys.exit(1)
-            log.info(f"[AUDIO] Streaming to active FM carrier pipe ({FIFO_PATH})...")
-            sink = FIFO_PATH
-        else:
-            log.warning(f"[AUDIO] No FIFO found.  Launching standalone transmitter instance on {freq:.1f} MHz...")
-            sink = "-"
-            # Start the modulator NOW (it's slow to initialise); sox is attached to it at T0.
-            fm_cmd = ["pi_fm_rds", "-freq", f"{freq:.1f}", "-audio", "-", "-ps", ps_name]
-            if rt_text:  # passing None here used to raise TypeError when --rds-text wasn't given
-                fm_cmd += ["-rt", rt_text]
-            fm_proc = subprocess.Popen(fm_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL)
-            processes.append(fm_proc)
+        current_audio_proc = subprocess.Popen(
+            sox_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=log_fd,
+            close_fds=True
+        )
+        os.close(log_fd)
 
-        # FIFO mode: the controller already wrote a WAV header into the pipe, so send headerless PCM.
-        # Standalone mode: pi_fm_rds reads this stream from scratch and its libsndfile input needs a
-        # real header, so send WAV.
-        out_type = "wav" if fm_proc else "raw"
-        sox_cmd = [
-            "sox", "-q",
-            "--buffer", "1024",
-            abs_audio_path,
-            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "au", FIFO_PATH,
-            "remix", "1,2",
-            "gain", "-1"
-        ]
-
-        duration = audio_duration_s(abs_audio_path)
-        t0 = signal_ready_and_get_t0()
-
-        # Launch each output at its own (T0-relative) moment, earliest first.
-        launches = [(t0 + offset, "fm")]
-        if enable_speakers:
-            launches.append((t0 + speaker_offset, "speaker"))
-        launches.sort()
-
-        sox_proc = speaker_proc = None
-        for when, name in launches:
-            sleep_until(when)
-            if name == "fm":
-                sox_started = time.monotonic()
-                sox_proc = subprocess.Popen(sox_cmd, stdout=fm_proc.stdin if fm_proc else None)
-                processes.append(sox_proc)
-                if fm_proc:
-                    fm_proc.stdin.close()  # so pi_fm_rds sees EOF when sox finishes
-                log.info(f"[AUDIO] Broadcasting started on {freq:.1f} MHz...")
-            else:
-                speaker_proc = subprocess.Popen(["play", "-q", abs_audio_path],
-                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                processes.append(speaker_proc)
-
-        # Wait for everything to finish.
-        sox_proc.wait()
-        report_fm_timing(duration, sox_started, time.monotonic(), sox_proc.returncode)
-        if fm_proc:
-            fm_proc.wait()
-        if speaker_proc:
-            speaker_proc.wait()
-        log.info("[AUDIO] Playback and broadcast completed cleanly.")
-
-    except KeyboardInterrupt:
-        log.warning("\n[AUDIO] Playback interrupted by user. Terminating broadcast processes...")
-    finally:
-        for proc in processes:
-            if proc.poll() is None:
-                proc.terminate()
+        rc = current_audio_proc.wait()
+        finished_at = time.monotonic()
+        report_fm_timing(duration, started_at, finished_at, rc)
+    except Exception as e:
+        os.close(log_fd)
+        log.error(f"[AUDIO] Failed to launch SoX process: {e}")
 
 
-def play_audio(audio_file, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset, no_fm=False):
+def play_audio(audio_file, freq=90.3, enable_speakers=False, ps_name="HOLIDAY", rt_text="Lightshow", offset=0.0, speaker_offset=0.0, no_fm=False):
+    """Main dispatch function for audio playback across platforms."""
     abs_audio_path = os.path.abspath(audio_file)
-    if not os.path.isfile(abs_audio_path):
-        log.error(f"[AUDIO] Audio file not found: {abs_audio_path}")
-        sys.exit(1)
-
-    log.info(f"[AUDIO] Initializing Audio FM Node")
-    log.info(f"[AUDIO] File: {abs_audio_path}")
-    log.info(f"[AUDIO] Frequency: {freq:.1f} MHz")
-    log.info(f"[AUDIO] Speaker Monitoring: {'ENABLED' if enable_speakers else 'DISABLED'}")
-    log.info(f"[AUDIO] Start offset vs T0: FM {offset:+.3f}s, speakers {speaker_offset:+.3f}s")
 
     if os.name == 'nt':
         play_windows(abs_audio_path, offset)
     elif no_fm:
         play_linux_speakers_only(abs_audio_path, speaker_offset)
     else:
-        play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, speaker_offset)
+        play_linux(abs_audio_path, offset)
 
 
 def main():

@@ -243,7 +243,7 @@ def cleanup_and_exit(signum=None, frame=None):
     terminate_all_children()
 
     # Clean up FIFO pipe
-    fifo_path = "/tmp/fm_audio.fifo"
+    fifo_path = "/tmp/fm_audio.au"
     if os.path.exists(fifo_path):
         try:
             os.remove(fifo_path)
@@ -314,7 +314,8 @@ def init_persistent_fm_carrier():
         return
 
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
-    
+    fifo_read_fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+
     # Step 4: /usr/local/bin/pi_fm_rds -freq 90.3 -audio /tmp/fm_audio.au ...
     fm_cmd = [
         "/usr/local/bin/pi_fm_rds",
@@ -324,16 +325,20 @@ def init_persistent_fm_carrier():
         "-rt", rt_text
     ]
 
-    fm_log_file = open("/tmp/pi_fm_rds.log", "w", buffering=1)
+    fm_log_file = os.open("/tmp/pi_fm_rds.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 
     # Pass close_fds=True to prevent pi_fm_rds from inheriting the dummy_fifo_fd handle
     fm_carrier_proc = subprocess.Popen(
         fm_cmd,
+        stdin=fifo_read_fd,
         stdout=subprocess.DEVNULL,
         stderr=fm_log_file,
         close_fds=True,
         start_new_session=True
     )
+
+    os.close(fifo_read_fd)
+    os.close(fm_log_file)
 
     # Give pi_fm_rds time to initialize DMA and open the reader side of the FIFO
     time.sleep(1.0)
