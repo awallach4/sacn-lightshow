@@ -625,7 +625,17 @@ def make_ipc_handler(node: InitializerNode):
                         "status": "ok", 
                         "message": "Full system process stack reloading..."
                     })
-                    threading.Thread(target=node.restart_full_system, daemon=True).start()
+                    # Flush socket buffer to local IPC stream (app.py)
+                    try:
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    
+                    # Pause main thread briefly so app.py proxies 200 OK to browser
+                    time.sleep(0.5)
+                    
+                    # Execute synchronous full system reload on main thread
+                    node.restart_full_system()
 
                 else:
                     self._send_json(400, {"error": f"Unknown config_type '{config_type}'"})
