@@ -1,0 +1,31 @@
+[Unit]
+Description=sacn-lightshow - Headless sACN & Relay Show Controller
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sacn-lightshow
+ExecStart=/home/pi/sacn-lightshow/.venv/bin/python3 src/main.py
+
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_DAC_OVERRIDE CAP_SYS_BOOT
+AmbientCapabilities=CAP_SYS_RAWIO CAP_DAC_OVERRIDE CAP_SYS_BOOT
+NoNewPrivileges=false
+
+# Restart policy: Always restart on crash, wait 3s before retry
+Restart=always
+RestartSec=3s
+
+# Ensure standard output/error stream to systemd journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lx-control
+
+# Resource control and safety timeouts
+KillMode=mixed
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

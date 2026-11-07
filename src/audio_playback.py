@@ -240,7 +240,7 @@ def play_linux(audio_file_path, offset=0.0):
         "gain", "-1"
     ]
 
-    log_fd = os.open("/tmp/sox_playback.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    log_fd = os.open("logs/sox_playback.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 
     # Handshake with show_control to receive T0 start time
     t0 = signal_ready_and_get_t0()

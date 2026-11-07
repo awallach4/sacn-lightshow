@@ -325,7 +325,7 @@ def init_persistent_fm_carrier():
         "-rt", rt_text
     ]
 
-    fm_log_file = os.open("/tmp/pi_fm_rds.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    fm_log_file = os.open("logs/pi_fm_rds.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 
     # Pass close_fds=True to prevent pi_fm_rds from inheriting the dummy_fifo_fd handle
     fm_carrier_proc = subprocess.Popen(
@@ -344,7 +344,7 @@ def init_persistent_fm_carrier():
     time.sleep(1.0)
 
     if fm_carrier_proc.poll() is not None:
-        log.error("[INIT] pi_fm_rds exited unexpectedly! Check /tmp/pi_fm_rds.log")
+        log.error("[INIT] pi_fm_rds exited unexpectedly! Check logs/pi_fm_rds.log")
 
 
 # ==============================================================================

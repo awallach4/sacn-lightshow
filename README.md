@@ -56,11 +56,19 @@ cd sacn-lightshow
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+sudo mv lightshow.config /etc/systemd/system                # Automatically initializes system at boot
+sudo mv 50-lightshow-power.rules /etc/polkit-1/rules.d      # Allows shutdown/reboot to work
 ```
 
 Create/edit config/main_config.json and config/patch.json
 
 Start the system: `python3 src/main.py`
+Or if using systemctl:
+```
+sudo systemctl daemon-reload
+sudo systemctl enable lightshow.service
+sudo systemctl start lightshow.service
+```
 
 Access the Vue app at http://localhost:5000 or http://[raspberry-pi-ip]:5000
 

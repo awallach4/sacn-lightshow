@@ -491,11 +491,11 @@ class InitializerNode:
         if action == "reboot":
             self.log.info("[INIT] Executing system reboot...")
             if os.name != 'nt':
-                os.system("sudo reboot")
+                subprocess.run(["systemctl", "reboot"], capture_output=True, text=True, check=True)
         elif action == "shutdown":
             self.log.info("[INIT] Executing system shutdown...")
             if os.name != 'nt':
-                os.system("sudo shutdown -h now")
+                subprocess.run(["systemctl", "poweroff"], capture_output=True, text=True, check=True)
 
     # --- CLEAN TEARDOWN ---
     def cleanup(self):
