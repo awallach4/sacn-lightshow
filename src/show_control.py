@@ -293,40 +293,61 @@ def streaming_wav_header(sample_rate=22050, channels=1, bits=16):
             + b"data" + struct.pack("<I", 0x7FFFFFD2))
 
 
+dummy_fifo_fd = None
+
 def init_persistent_fm_carrier():
-    """Launches pi_fm_rds accepting raw PCM streaming over stdin."""
-    global fm_carrier_proc, sys_config
+    """Creates the FIFO pipe and launches persistent pi_fm_rds using raw PCM mode."""
+    global fm_carrier_proc, sys_config, dummy_fifo_fd
 
     broadcast_cfg = sys_config.get("broadcast", {})
     freq = broadcast_cfg.get("fm_frequency", 90.3)
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
     rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
+    fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
 
     if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
         return
 
+    # Cleanly recreate FIFO pipe
+    if os.path.exists(fifo_path):
+        if not stat.S_ISFIFO(os.stat(fifo_path).st_mode):
+            os.remove(fifo_path)
+            os.mkfifo(fifo_path)
+    else:
+        os.mkfifo(fifo_path)
+
+    # Open persistent write descriptor so the FIFO remains active
+    try:
+        dummy_fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+        log.info(f"[INIT] Acquired persistent dummy handle on {fifo_path}")
+    except Exception as e:
+        log.error(f"[INIT] Failed to open dummy FIFO handle: {e}")
+
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
     
+    # Pass raw audio parameters (-ar 22050) so libsndfile bypasses fseek/header checks
     fm_cmd = [
         "/usr/local/bin/pi_fm_rds",
         "-freq", str(freq),
-        "-audio", "-",
+        "-audio", fifo_path,
+        "-ar", "22050",
         "-ps", ps_name,
         "-rt", rt_text
     ]
 
-    fm_log_file = open("logs/pi_fm_rds.log", "w")
+    fm_log_file = open("/tmp/pi_fm_rds.log", "w")
 
-    # Pass a persistent pipe so stdin remains open across track changes
     fm_carrier_proc = subprocess.Popen(
         fm_cmd,
-        stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=fm_log_file,
         start_new_session=True
     )
     
     time.sleep(0.5)
+
+    if fm_carrier_proc.poll() is not None:
+        log.error("[INIT] pi_fm_rds failed to stay running! Check /tmp/pi_fm_rds.log")
 
 
 def _fm_log_tail(max_chars=300):
