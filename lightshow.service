@@ -26,6 +26,9 @@ SyslogIdentifier=lx-control
 # Resource control and safety timeouts
 KillMode=mixed
 TimeoutStopSec=10s
+MemoryHigh=200M
+MemoryMax=256M
+Delegate=no
 
 [Install]
 WantedBy=multi-user.target
