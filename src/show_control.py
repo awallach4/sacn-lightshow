@@ -297,7 +297,7 @@ def init_persistent_fm_carrier():
 
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
     fm_cmd = [
-        "pi_fm_rds",
+        "/usr/local/bin/pi_fm_rds",
         "-freq", str(freq),
         "-audio", fifo_path,
         "-ps", ps_name,
@@ -307,7 +307,8 @@ def init_persistent_fm_carrier():
     fm_carrier_proc = subprocess.Popen(
         fm_cmd, 
         stdout=subprocess.DEVNULL, 
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
     )
     time.sleep(0.5)
 
