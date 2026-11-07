@@ -23,6 +23,8 @@ import os
 import time
 import json
 import signal
+import stat
+import struct
 import threading
 import subprocess
 import argparse
@@ -277,8 +279,22 @@ def emergency_panic_latch(signum=None, frame=None):
 # Keep a module-level reference so python doesn't garbage-collect/close the dummy writer
 dummy_fifo_writer = None
 
+def streaming_wav_header(sample_rate=22050, channels=1, bits=16):
+    """44-byte WAV header with a 'practically endless' data length.
+
+    pi_fm_rds opens its input with libsndfile, which must recognise a *self-describing* format. The
+    audio node sends headerless raw PCM, so we write this header into the FIFO once, at carrier start-up;
+    everything that follows is then read as the PCM samples of that (never-ending) WAV stream.
+    The parameters MUST match the sox output options in audio_playback.py (22050 Hz, mono, s16).
+    """
+    block_align = channels * bits // 8
+    return (b"RIFF" + struct.pack("<I", 0x7FFFFFFF) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, sample_rate * block_align, block_align, bits)
+            + b"data" + struct.pack("<I", 0x7FFFFFD2))
+
+
 def init_persistent_fm_carrier():
-    """Creates the FIFO pipe and launches persistent pi_fm_rds with a dummy write handle."""
+    """Creates the FIFO pipe and launches a persistent pi_fm_rds fed from it."""
     global fm_carrier_proc, sys_config, dummy_fifo_writer
 
     broadcast_cfg = sys_config.get("broadcast", {})
@@ -286,29 +302,33 @@ def init_persistent_fm_carrier():
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
     rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
     fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
+    pi_fm_rds_path = broadcast_cfg.get("pi_fm_rds_path", "/usr/local/bin/pi_fm_rds")
 
     if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
         return
 
-    # 1. Cleanly recreate the FIFO pipe
-    if os.path.exists(fifo_path):
-        if not stat.S_ISFIFO(os.stat(fifo_path).st_mode):
-            os.remove(fifo_path)
-            os.mkfifo(fifo_path)
-    else:
-        os.mkfifo(fifo_path)
-
-    # 2. Open non-blocking write handle so pi_fm_rds sees an active writer on launch
+    # 1. Always start from a fresh FIFO so no stale bytes (or stale reader) from a previous run survive.
     try:
-        fifo_fd = os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-        dummy_fifo_writer = os.fdopen(fifo_fd, 'w')
+        os.remove(fifo_path)
+    except FileNotFoundError:
+        pass
+    os.mkfifo(fifo_path)
+
+    # 2. Hold the FIFO open read+write. On Linux O_RDWR on a FIFO never blocks, and because a writer is
+    #    always present, pi_fm_rds never sees EOF between tracks. (The old O_WRONLY|O_NONBLOCK open
+    #    failed with ENXIO, because no reader existed yet.) Then write the one-time WAV header.
+    try:
+        fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+        dummy_fifo_writer = os.fdopen(fifo_fd, 'wb', buffering=0)
+        dummy_fifo_writer.write(streaming_wav_header())
     except Exception as e:
-        log.warning(f"[INIT] Could not open dummy writer on FIFO: {e}")
+        log.error(f"[INIT] Could not prepare the FM FIFO {fifo_path}: {e}")
+        return
 
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
-    
+
     fm_cmd = [
-        "/usr/local/bin/pi_fm_rds",
+        pi_fm_rds_path,
         "-freq", str(freq),
         "-audio", fifo_path,
         "-ps", ps_name,
@@ -319,15 +339,24 @@ def init_persistent_fm_carrier():
 
     fm_carrier_proc = subprocess.Popen(
         fm_cmd,
-        stdout=subprocess.DEVNULL,
+        stdout=fm_log_file,
         stderr=fm_log_file,
         start_new_session=True
     )
-    
+
     time.sleep(0.5)
 
     if fm_carrier_proc.poll() is not None:
-        log.error("[INIT] pi_fm_rds failed to stay running! Check /tmp/pi_fm_rds.log")
+        log.error(f"[INIT] pi_fm_rds exited immediately (code {fm_carrier_proc.returncode}): {_fm_log_tail()}")
+
+
+def _fm_log_tail(max_chars=300):
+    try:
+        with open("/tmp/pi_fm_rds.log", "r", errors="replace") as f:
+            return f.read().strip()[-max_chars:] or "(no output; see /tmp/pi_fm_rds.log)"
+    except Exception:
+        return "(could not read /tmp/pi_fm_rds.log)"
+
 
 # ==============================================================================
 # PLAYLIST EXECUTION LOOP
@@ -465,6 +494,9 @@ def run_track(track_idx, playlist):
         button_hold = current_track.get("button_hold_s", 0)
 
         light_speed = current_track.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
+        if (sys_config.get("broadcast", {}).get("fm_enabled", True) and os.name != 'nt'
+                and (fm_carrier_proc is None or fm_carrier_proc.poll() is not None)):
+            log.error(f"[SHOW] FM carrier (pi_fm_rds) is NOT running; this track will not be broadcast. {_fm_log_tail()}")
         audio_s, seq_s = check_track_lengths(audio_path, sequence_path)
 
         audio_cmd = [sys.executable, "-u", audio_script, audio_path,

@@ -216,17 +216,22 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, 
             log.warning(f"[AUDIO] No FIFO found.  Launching standalone transmitter instance on {freq:.1f} MHz...")
             sink = "-"
             # Start the modulator NOW (it's slow to initialise); sox is attached to it at T0.
-            fm_proc = subprocess.Popen(
-                ["pi_fm_rds", "-freq", f"{freq:.1f}", "-audio", "-", "-ps", ps_name, "-rt", rt_text],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            fm_cmd = ["pi_fm_rds", "-freq", f"{freq:.1f}", "-audio", "-", "-ps", ps_name]
+            if rt_text:  # passing None here used to raise TypeError when --rds-text wasn't given
+                fm_cmd += ["-rt", rt_text]
+            fm_proc = subprocess.Popen(fm_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
             processes.append(fm_proc)
 
+        # FIFO mode: the controller already wrote a WAV header into the pipe, so send headerless PCM.
+        # Standalone mode: pi_fm_rds reads this stream from scratch and its libsndfile input needs a
+        # real header, so send WAV.
+        out_type = "wav" if fm_proc else "raw"
         sox_cmd = [
             "sox", "-q",
             "--buffer", "1024",
             abs_audio_path,
-            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw", sink,
+            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", out_type, sink,
             "remix", "1,2",
             "gain", "-1"
         ]
