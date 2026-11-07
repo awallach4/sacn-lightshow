@@ -139,7 +139,7 @@ class InitializerNode:
             self.processes["web_server"] = subprocess.Popen([py_exe, web_script])
 
         # 2. Scheduler Node (scheduler_node.py)
-        if sys_cfg["services"].get("scheduler", True) == True:
+        if sys_cfg.get("services", {}).get("scheduler", True) == True:
             sched_script = "src/scheduler.py"
             if os.path.exists(sched_script):
                 self.log.info(f"[INIT] Launching Scheduler Node ({sched_script})...")
@@ -148,7 +148,7 @@ class InitializerNode:
             self.log.info("Scheduler node disabled, skipping...")
 
         # 3. sACN Listener Node (sacn_listener.py)
-        if sys_cfg["services"].get("sacn_listener", True) == True:
+        if sys_cfg.get("services", {}).get("sacn_listener", True) == True:
             listener_script = "src/sacn/sacn_listener.py"
             if os.path.exists(listener_script):
                 self.log.info(f"[INIT] Launching sACN Listener ({listener_script})...")
@@ -166,9 +166,9 @@ class InitializerNode:
         script_map = {
             "web_server": "src/web/app.py"
         }
-        if sys_cfg["services"].get("scheduler", True) == True:
+        if sys_cfg.get("services", {}).get("scheduler", True) == True:
             script_map["scheduler"] = "src/scheduler.py"
-        if sys_cfg["services"].get("sacn_listener", True) == True:
+        if sys_cfg.get("services", {}).get("sacn_listener", True) == True:
             script_map["sacn_listener"] = "src/sacn/sacn_listener.py"
         while self.running:
             py_exe = sys.executable
@@ -210,9 +210,9 @@ class InitializerNode:
         script_map = {
             "web_server": "src/web/app.py"
         }
-        if sys_cfg["services"].get("scheduler", True) == True:
+        if sys_cfg.get("services", {}).get("scheduler", True) == True:
             script_map["scheduler"] = "src/scheduler.py"
-        if sys_cfg["services"].get("sacn_listener", True) == True:
+        if sys_cfg.get("services", {}).get("sacn_listener", True) == True:
             script_map["sacn_listener"] = "src/sacn/sacn_listener.py"
 
         if name not in script_map:
