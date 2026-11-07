@@ -274,9 +274,12 @@ def emergency_panic_latch(signum=None, frame=None):
 # FM TRANSMITTER CARRIER MANAGEMENT
 # ==============================================================================
 
+# Keep a module-level reference so python doesn't garbage-collect/close the dummy writer
+dummy_fifo_writer = None
+
 def init_persistent_fm_carrier():
-    """Creates the FIFO pipe and launches persistent pi_fm_rds."""
-    global fm_carrier_proc, sys_config
+    """Creates the FIFO pipe and launches persistent pi_fm_rds with a dummy write handle."""
+    global fm_carrier_proc, sys_config, dummy_fifo_writer
 
     broadcast_cfg = sys_config.get("broadcast", {})
     freq = broadcast_cfg.get("fm_frequency", 90.3)
@@ -284,18 +287,26 @@ def init_persistent_fm_carrier():
     rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
     fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.fifo")
 
-    if not broadcast_cfg.get("fm_enabled", True):
-        log.info("[INIT] FM transmitter disabled by config (broadcast.fm_enabled = false).")
+    if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
         return
 
-    if os.name == 'nt':
-        log.info("[INIT] Windows OS detected. FM transmitter initialization skipped.")
-        return
-
-    if not os.path.exists(fifo_path):
+    # 1. Cleanly recreate the FIFO pipe
+    if os.path.exists(fifo_path):
+        if not stat.S_ISFIFO(os.stat(fifo_path).st_mode):
+            os.remove(fifo_path)
+            os.mkfifo(fifo_path)
+    else:
         os.mkfifo(fifo_path)
 
+    # 2. Open non-blocking write handle so pi_fm_rds sees an active writer on launch
+    try:
+        fifo_fd = os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+        dummy_fifo_writer = os.fdopen(fifo_fd, 'w')
+    except Exception as e:
+        log.warning(f"[INIT] Could not open dummy writer on FIFO: {e}")
+
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
+    
     fm_cmd = [
         "/usr/local/bin/pi_fm_rds",
         "-freq", str(freq),
@@ -303,14 +314,20 @@ def init_persistent_fm_carrier():
         "-ps", ps_name,
         "-rt", rt_text
     ]
-    
+
+    fm_log_file = open("/tmp/pi_fm_rds.log", "w")
+
     fm_carrier_proc = subprocess.Popen(
-        fm_cmd, 
-        stdout=subprocess.DEVNULL, 
-        stderr=subprocess.DEVNULL,
+        fm_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=fm_log_file,
         start_new_session=True
     )
+    
     time.sleep(0.5)
+
+    if fm_carrier_proc.poll() is not None:
+        log.error("[INIT] pi_fm_rds failed to stay running! Check /tmp/pi_fm_rds.log")
 
 # ==============================================================================
 # PLAYLIST EXECUTION LOOP
