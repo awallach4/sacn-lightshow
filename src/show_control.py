@@ -276,39 +276,23 @@ def emergency_panic_latch(signum=None, frame=None):
 # FM TRANSMITTER CARRIER MANAGEMENT
 # ==============================================================================
 
-# Keep a module-level reference so python doesn't garbage-collect/close the dummy writer
-dummy_fifo_writer = None
-
-def streaming_wav_header(sample_rate=22050, channels=1, bits=16):
-    """44-byte WAV header with a 'practically endless' data length.
-
-    pi_fm_rds opens its input with libsndfile, which must recognise a *self-describing* format. The
-    audio node sends headerless raw PCM, so we write this header into the FIFO once, at carrier start-up;
-    everything that follows is then read as the PCM samples of that (never-ending) WAV stream.
-    The parameters MUST match the sox output options in audio_playback.py (22050 Hz, mono, s16).
-    """
-    block_align = channels * bits // 8
-    return (b"RIFF" + struct.pack("<I", 0x7FFFFFFF) + b"WAVE"
-            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, sample_rate * block_align, block_align, bits)
-            + b"data" + struct.pack("<I", 0x7FFFFFD2))
-
-
+# Module-level variable to hold the dummy descriptor open across the daemon lifecycle
 dummy_fifo_fd = None
 
 def init_persistent_fm_carrier():
-    """Creates the FIFO pipe ending in .wav and launches persistent pi_fm_rds."""
+    """Creates the persistent FIFO pipe and launches pi_fm_rds using an active RDWR handle."""
     global fm_carrier_proc, sys_config, dummy_fifo_fd
 
     broadcast_cfg = sys_config.get("broadcast", {})
     freq = broadcast_cfg.get("fm_frequency", 90.3)
     ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
     rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
-    fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.wav")
+    fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.au")
 
     if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
         return
 
-    # 1. Cleanly recreate the FIFO pipe
+    # 1. Cleanly recreate the FIFO pipe ending in .au
     if os.path.exists(fifo_path):
         if not stat.S_ISFIFO(os.stat(fifo_path).st_mode):
             os.remove(fifo_path)
@@ -316,15 +300,16 @@ def init_persistent_fm_carrier():
     else:
         os.mkfifo(fifo_path)
 
-    # 2. Acquire RDWR handle so pi_fm_rds finds an active pipe handle on startup
+    # 2. Open RDWR handle BEFORE pi_fm_rds starts so libsndfile finds an active pipe handle
     try:
-        dummy_fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+        dummy_fifo_fd = os.open(fifo_path, os.O_RDWR)
         log.info(f"[INIT] Acquired persistent handle on FIFO pipe ({fifo_path}).")
     except Exception as e:
         log.error(f"[INIT] Failed to hold open FIFO pipe: {e}")
+        return
 
     log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
-
+    
     fm_cmd = [
         "/usr/local/bin/pi_fm_rds",
         "-freq", str(freq),
@@ -341,19 +326,12 @@ def init_persistent_fm_carrier():
         stderr=fm_log_file,
         start_new_session=True
     )
-
-    time.sleep(0.5)
+    
+    # Allow pi_fm_rds time to initialize DMA and open the FIFO reader
+    time.sleep(1.0)
 
     if fm_carrier_proc.poll() is not None:
         log.error("[INIT] pi_fm_rds failed to stay running! Check /tmp/pi_fm_rds.log")
-
-
-def _fm_log_tail(max_chars=300):
-    try:
-        with open("/tmp/pi_fm_rds.log", "r", errors="replace") as f:
-            return f.read().strip()[-max_chars:] or "(no output; see /tmp/pi_fm_rds.log)"
-    except Exception:
-        return "(could not read /tmp/pi_fm_rds.log)"
 
 
 # ==============================================================================

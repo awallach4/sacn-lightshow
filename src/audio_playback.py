@@ -25,7 +25,7 @@ import time
 from logger_setup import get_node_logger, setup_global_exception_handler
 
 READY_TOKEN = "@@READY@@"
-FIFO_PATH = "/tmp/fm_audio.fifo"
+FIFO_PATH = "/tmp/fm_audio.au"
 CONFIG_FILE = Path("config/main_config.json")
 
 def load_log_level() -> str:
@@ -231,7 +231,7 @@ def play_linux(abs_audio_path, freq, enable_speakers, ps_name, rt_text, offset, 
             "sox", "-q",
             "--buffer", "1024",
             abs_audio_path,
-            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "wav", FIFO_PATH,
+            "-r", "22050", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "au", FIFO_PATH,
             "remix", "1,2",
             "gain", "-1"
         ]
