@@ -72,12 +72,14 @@ class SchedulerNode:
         return {}
 
     def run(self):
-        show_name = self.main_config.get("system", {}).get("show_name", "Holiday Lightshow")
+        show_name = self.main_config.get("system", {}).get("show_name") or "Holiday Lightshow"
+        schedule_name = self.main_config.get("system", {}).get("schedule_name") or "schedule"
 
         self.log.info("==================================================")
         self.log.info(f"   {show_name.upper()} - SCHEDULER DAEMON   ")
         self.log.info("==================================================")
         self.log.info(f"[SCHEDULER] Main config: {self.main_config_path}")
+        self.log.info(f"[SCHEULDER] Schedule: {schedule_name}")
         self.log.info(f"[SCHEDULER] Schedule matrix source: {self.schedule_path}")
         self.log.info(f"[SCHEDULER] API Target: {INIT_NODE_URL}")
 
@@ -103,7 +105,7 @@ class SchedulerNode:
 
                 # Load latest schedule matrix
                 schedule_data = self._load_json(self.schedule_path)
-                day_schedule = schedule_data.get("schedule", {}).get(day_name, {})
+                day_schedule = schedule_data.get(schedule_name, {}).get(day_name, {})
 
                 # Check if current minute key exists in schedule
                 if time_key in day_schedule:

@@ -191,7 +191,8 @@ def execute_macro():
         "all_on": "ON",
         "off": "OFF",
         "blackout": "OFF",
-        "panic": "PANIC"
+        "panic": "PANIC",
+        "reset": "RESET"
     }
 
     if action not in macro_map:

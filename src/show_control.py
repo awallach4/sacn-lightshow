@@ -44,8 +44,17 @@ DEFAULT_MAIN_CONFIG = PROJECT_ROOT / "config" / "main_config.json"
 # Where the web uploader stores files; used to resolve bare filenames in playlist.json
 ASSET_DIRS = {"audio": "showfiles/music", "sequence": "showfiles/sequences"}
 
+def get_system_status() -> dict:
+    """Queries Initializer Node for system state."""
+    url = f"{INIT_NODE_URL}/api/status"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+
 # Global Execution State
-is_panicked = False
 fm_carrier_proc = None
 active_processes = []
 is_terminating = False
@@ -380,11 +389,19 @@ def kill_process_group_instantly(proc):
 
 def run_track(track_idx, playlist):
     """Executes a track by index from the master playlist with T0 clock sync."""
-    global active_processes, sys_config, is_terminating, is_panicked
+    global active_processes, sys_config, is_terminating
     total_tracks = len(playlist)
+
+    status = get_system_status()
+    current_state = status.get("system_state", "UNKNOWN")
+    is_panicked = current_state == "PANIC"
     
     if not (0 <= track_idx < total_tracks):
         log.error(f"[SHOW] Track index {track_idx} out of range.")
+        return False
+
+    if is_panicked:
+        log.error("[SHOW] Cannot run show while system is in panic.")
         return False
 
     current_track = playlist[track_idx]
@@ -578,7 +595,9 @@ def main():
     try:
         for idx in range(len(playlist)):
             log.info(f"\n[SHOW CONTROL] Starting track index {idx} of {len(playlist)}...")
-            if is_panicked:
+            status = get_system_status()
+            current_state = status.get("system_state", "UNKNOWN")
+            if current_state == "PANIC":
                 show_failed = True
                 break
             success = run_track(idx, playlist)      
@@ -592,7 +611,7 @@ def main():
         log.error(f"[SHOW CONTROL] Unexpected exception in main show loop: {e}")
         show_failed = True
 
-    if show_failed or is_panicked:
+    if show_failed or current_state == "PANIC":
         emergency_panic_latch()
     else:
         log.info("\n[SHOW] Playlist execution finished successfully.")

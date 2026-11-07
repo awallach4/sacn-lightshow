@@ -72,8 +72,13 @@ The `main_config.json` file contains system settings, including the paths to oth
 {
   "system": {
     "show_name": "Holiday Lightshow",
-    "playlist_name": "Winter 2026",
+    "playlist_name": "Winter 2026",       # Playlist in config/playlist.json to use
+    "schedule_name": "schedule",          # Schedule in config/schedule.json to use
     "log_level": "INFO",
+    "services": {                         # Use this to disable services
+      "sacn_listener": true,
+      "scheduler": true
+    },
     "broadcast": {
       "fm_enabled": true,
       "fm_frequency": 90.3,
@@ -314,7 +319,7 @@ The schedule is a list of times each day to run a command. This can be the name 
 
 ```
 {
-  "schedule": {
+  "schedule_name": {
     "sunday": {
       "1700": "Winter 2026",
       "1800": "Winter 2026",

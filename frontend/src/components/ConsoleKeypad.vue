@@ -40,20 +40,20 @@ const buttons = [
   { label: '9', value: '9', type: 'num' },
   { label: 'Rem Dim', value: 'REMDIM', type: 'syntax' },
   { label: 'Home', value: 'HOME', type: 'syntax' },
-  { label: 'Chan Check', value: 'CHECK', type: 'action right' },
+  { label: 'Chan Check', value: 'CHECK', type: 'action right small' },
 
   { label: '4', value: '4', type: 'num' },
   { label: '5', value: '5', type: 'num' },
   { label: '6', value: '6', type: 'num' },
   { label: 'Out', value: 'OUT', type: 'action' },
-  { label: 'Select Last', value: 'SELECTLAST', type: 'action' },
+  { label: 'Select Last', value: 'SELECTLAST', type: 'action small' },
   { label: 'Last', value: 'LAST', type: 'action right' },
 
   { label: '1', value: '1', type: 'num' },
   { label: '2', value: '2', type: 'num' },
   { label: '3', value: '3', type: 'num' },
   { label: 'Full', value: 'FULL', type: 'syntax' },
-  { label: 'Select Active', value: 'SELECTACTIVE', type: 'action' },
+  { label: 'Select Active', value: 'SELECTACTIVE', type: 'action small' },
   { label: 'Next', value: 'NEXT', type: 'action right' },
 
   { label: 'Clear', value: 'CLEAR', type: 'clear' },
@@ -79,7 +79,7 @@ const buttons = [
   background: #18181b;
   padding: 16px;
   border-radius: 8px;
-  width: 456px;
+  width: 472px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
@@ -89,7 +89,7 @@ const buttons = [
   border: 1px solid #27272a;
   border-radius: 6px;
   font-weight: 700;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   font-family: monospace;
   cursor: pointer;
   background: #27272a;
@@ -160,7 +160,7 @@ const buttons = [
     height: 48px;
     width: auto;
     min-width: 32px;
-    font-size: 0.8rem;
+    font-size: 0.9rem;
   }
   .key-btn.right {
     margin-left: 4px;

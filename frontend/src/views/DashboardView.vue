@@ -29,6 +29,7 @@ const isMacroLoading = reactive<Record<string, boolean>>({
   all_on: false,
   blackout: false,
   panic: false,
+  reset: false,
 })
 
 const isHostLoading = reactive<Record<string, boolean>>({
@@ -260,12 +261,12 @@ useSeoMeta({
             v-model="selected_playlist"
             :items="playlists"
             placeholder="Select a Playlist"
-            :disabled="system_state === 'SHOW_RUNNING'"
+            :disabled="system_state === 'SHOW_RUNNING' || system_state === 'PANIC'"
           />
           <UButton
             class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.start_show"
-            :disabled="system_state === 'SHOW_RUNNING'"
+            :disabled="system_state === 'SHOW_RUNNING' || system_state === 'PANIC'"
             @click="startShow()"
           >
             Start Show
@@ -275,6 +276,7 @@ useSeoMeta({
             color="info"
             class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.all_on"
+            :disabled="system_state === 'PANIC'"
             @click="sendMacro('all_on')"
           >
             All ON
@@ -283,6 +285,7 @@ useSeoMeta({
             color="error"
             class="justify-center text-neutral-900 h-8"
             :loading="isMacroLoading.blackout"
+            :disabled="system_state === 'PANIC'"
             @click="sendMacro('blackout')"
           >
             Blackout
@@ -311,9 +314,19 @@ useSeoMeta({
               color="warning"
               class="justify-center text-neutral-900 h-8"
               :loading="isMacroLoading.panic"
+              :disabled="system_state === 'PANIC'"
               @click="sendMacro('panic')"
             >
               Emergency Shutoff
+            </UButton>
+            <UButton
+              color="primary"
+              class="justify-center text-neutral-900 h-8"
+              :loading="isMacroLoading.reset"
+              :disabled="system_state !== 'PANIC'"
+              @click="sendMacro('reset')"
+            >
+              Reset Panic
             </UButton>
             <UButton
               color="neutral"

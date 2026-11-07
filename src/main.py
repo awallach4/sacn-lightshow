@@ -90,6 +90,19 @@ class InitializerNode:
             "system": {
                 "show_name": "Holiday Lightshow",
                 "playlist_name": "Winter 2026",
+                "schedule_name": "",
+                "log_level": "INFO",
+                "services": {
+                    "sacn_listener": True,
+                    "scheduler": True
+                },
+                "broadcast": {
+                    "fm_enabled": True,
+                    "fm_frequency": 90.3,
+                    "rds_ps_name": "HOLIDAY",
+                    "rds_rt_default": "Lightshow",
+                    "fifo_path": "/tmp/fm_audio.fifo"
+                },
                 "broadcast": {
                     "fm_frequency": 90.3,
                     "rds_ps_name": "HOLIDAY",
@@ -126,16 +139,22 @@ class InitializerNode:
             self.processes["web_server"] = subprocess.Popen([py_exe, web_script])
 
         # 2. Scheduler Node (scheduler_node.py)
-        sched_script = "src/scheduler.py"
-        if os.path.exists(sched_script):
-            self.log.info(f"[INIT] Launching Scheduler Node ({sched_script})...")
-            self.processes["scheduler"] = subprocess.Popen([py_exe, sched_script])
+        if sys_cfg["services"].get("scheduler", True) == True:
+            sched_script = "src/scheduler.py"
+            if os.path.exists(sched_script):
+                self.log.info(f"[INIT] Launching Scheduler Node ({sched_script})...")
+                self.processes["scheduler"] = subprocess.Popen([py_exe, sched_script])
+        else:
+            self.log.info("Scheduler node disabled, skipping...")
 
         # 3. sACN Listener Node (sacn_listener.py)
-        listener_script = "src/sacn/sacn_listener.py"
-        if os.path.exists(listener_script):
-            self.log.info(f"[INIT] Launching sACN Listener ({listener_script})...")
-            self.processes["sacn_listener"] = subprocess.Popen([py_exe, listener_script, "-p", "config/patch.json"])
+        if sys_cfg["services"].get("sacn_listener", True) == True:
+            listener_script = "src/sacn/sacn_listener.py"
+            if os.path.exists(listener_script):
+                self.log.info(f"[INIT] Launching sACN Listener ({listener_script})...")
+                self.processes["sacn_listener"] = subprocess.Popen([py_exe, listener_script, "-p", "config/patch.json"])
+        else:
+            self.log.info("sACN Listener node disabled, skipping...")
 
         # Start Process Health Monitor
         self.monitor_thread = threading.Thread(target=self._monitor_processes, daemon=True)
@@ -143,14 +162,16 @@ class InitializerNode:
 
     def _monitor_processes(self):
         """Continuously checks child processes and re-spawns core nodes if they crash."""
+        sys_cfg = self.config.get("system", {})
+        script_map = {
+            "web_server": "src/web/app.py"
+        }
+        if sys_cfg["services"].get("scheduler", True) == True:
+            script_map["scheduler"] = "src/scheduler.py"
+        if sys_cfg["services"].get("sacn_listener", True) == True:
+            script_map["sacn_listener"] = "src/sacn/sacn_listener.py"
         while self.running:
             py_exe = sys.executable
-            script_map = {
-                "web_server": "src/web/app.py",
-                "scheduler": "src/scheduler.py",
-                "sacn_listener": "src/sacn/sacn_listener.py"
-            }
-            
             for name, script_path in script_map.items():
                 proc = self.processes[name]
                 if proc and proc.poll() is not None:
@@ -185,11 +206,14 @@ class InitializerNode:
     def restart_node(self, name: str):
         """Safely restarts a single managed child node process."""
         py_exe = sys.executable
+        sys_cfg = self.config.get("system", {})
         script_map = {
-            "web_server": "src/web/app.py",
-            "scheduler": "src/scheduler.py",
-            "sacn_listener": "src/sacn/sacn_listener.py"
+            "web_server": "src/web/app.py"
         }
+        if sys_cfg["services"].get("scheduler", True) == True:
+            script_map["scheduler"] = "src/scheduler.py"
+        if sys_cfg["services"].get("sacn_listener", True) == True:
+            script_map["sacn_listener"] = "src/sacn/sacn_listener.py"
 
         if name not in script_map:
             self.log.warning(f"[INIT] Cannot restart unknown node: {name}")
@@ -320,6 +344,9 @@ class InitializerNode:
 
     def release_all_universes(self, priority: int = None):
         """Sends zero-value frames to ALL patched universes and deactivates outputs."""
+        if self.current_state == State.PANIC:
+            self.log.error("Cannot send macro 'All ON' while system is in panic.")
+            return
         net_cfg = self.config.get("system", {}).get("network", {})
         priority = priority or net_cfg.get("priority_normal", 100)
         is_multicast = net_cfg.get("multicast", True)
@@ -352,8 +379,53 @@ class InitializerNode:
         except Exception as e:
             self.log.error(f"[INIT] Failed to send blackout sACN: {e}")
 
+    def send_panic(self):
+        """Sends zero-value frames to ALL patched universes and deactivates outputs."""
+        net_cfg = self.config.get("system", {}).get("network", {})
+        is_multicast = net_cfg.get("multicast", True)
+
+        all_universe_frames = self._get_all_patched_universes()
+        target_universes = list(all_universe_frames.keys())
+        self.stop_active_output()
+
+        self.current_state = State.PANIC
+        self.log.warning(f"[PANIC] Latching all universes to 0")
+        def _panic_loop():
+            try:
+                import sacn
+                sender = sacn.sACNsender(source_name="PANIC")
+                sender.start()
+
+                # Activate output and assign scaled DMX payload for each patched universe
+                for u_id, mask in all_universe_frames.items():
+                    sender.activate_output(u_id)
+                    sender[u_id].priority = 200
+                    sender[u_id].multicast = is_multicast
+                    sender[u_id].dmx_data = (0,) * 512
+
+                active_universes = list(all_universe_frames.keys())
+
+                while self.current_state == State.PANIC:
+                    time.sleep(0.5)
+
+                # Blackout and deactivate outputs across all active universes
+                for u_id in active_universes:
+                    sender[u_id].dmx_data = (0,) * 512
+                    time.sleep(0.02)
+                    sender.deactivate_output(u_id)
+                sender.stop()
+                
+            except Exception as err:
+                self.log.error(f"[INIT] Failed to send panic blackout: {err}")
+
+        self.macro_thread = threading.Thread(target=_panic_loop, daemon=True)
+        self.macro_thread.start()
+
     def trigger_all_on(self, level: int = 255):
         """Drives ONLY patched channels on ALL universes defined in patch.json to full level."""
+        if self.current_state == State.PANIC:
+            self.log.error("Cannot send macro 'All ON' while system is in panic.")
+            return
         self.stop_active_output()
         self.current_state = State.STATIC_ON
         self.macro_active = True
@@ -400,6 +472,9 @@ class InitializerNode:
 
     def start_show(self, playlist_name: str = None):
         """Stops static output and launches show_control.py with the requested playlist."""
+        if self.current_state == State.PANIC:
+            self.log.error("Cannot start show while system is in panic.")
+            return
         self.stop_active_output()
         self.current_state = State.SHOW_RUNNING
         
@@ -409,15 +484,6 @@ class InitializerNode:
         
         self.log.info(f"[INIT] Starting show control with playlist '{target_playlist}'...")
         self.processes["show_control"] = subprocess.Popen(cmd, start_new_session=True)
-
-    def trigger_panic(self):
-        """Immediately halts all processes, releases universes at panic priority, and flags PANIC state."""
-        self.log.warning("[INIT] !!! PANIC TRIGGERED !!! Halting all show outputs.")
-        self.stop_active_output()
-
-        panic_priority = self.config.get("system", {}).get("network", {}).get("priority_panic", 200)
-        self.release_all_universes(priority=panic_priority)
-        self.current_state = State.PANIC
 
     def execute_host_command(self, action: str):
         """Executes system-level host operations."""
@@ -489,7 +555,11 @@ def make_ipc_handler(node: InitializerNode):
                     node.current_state = State.OFF
                     self._send_json(200, {"status": "ok", "state": node.current_state})
                 elif action == "PANIC":
-                    node.trigger_panic()
+                    node.send_panic()
+                    node.current_state = State.PANIC
+                    self._send_json(200, {"status": "ok", "state": node.current_state})
+                elif action == "RESET":
+                    node.current_state = State.OFF
                     self._send_json(200, {"status": "ok", "state": node.current_state})
                 else:
                     self._send_json(400, {"error": f"Unknown macro action '{action}'"})
