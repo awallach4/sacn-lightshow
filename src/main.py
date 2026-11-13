@@ -84,7 +84,7 @@ class InitializerNode:
                     return json.load(f)
             except Exception as e:
                 self.log.warning(f"[INIT] Failed to read {self.config_path}: {e}")
-        
+
         # Fallback schema matching main_config.json structure
         return {
             "system": {
@@ -95,18 +95,6 @@ class InitializerNode:
                 "services": {
                     "sacn_listener": True,
                     "scheduler": True
-                },
-                "broadcast": {
-                    "fm_enabled": True,
-                    "fm_frequency": 90.3,
-                    "rds_ps_name": "HOLIDAY",
-                    "rds_rt_default": "Lightshow",
-                    "fifo_path": "/tmp/fm_audio.fifo"
-                },
-                "broadcast": {
-                    "fm_frequency": 90.3,
-                    "rds_ps_name": "HOLIDAY",
-                    "fifo_path": "/tmp/fm_audio.fifo"
                 },
                 "network": {
                     "sacn_universe": 11,
@@ -323,7 +311,7 @@ class InitializerNode:
             self.macro_thread.join(timeout=2.0)
 
         show_proc = self.processes["show_control"]
-        
+
         # 1. Kill registered worker child PIDs directly
         for pid in self.active_worker_pids:
             try:
@@ -338,8 +326,8 @@ class InitializerNode:
         # 2. Kill show_control and its entire process group
         if show_proc and show_proc.poll() is None:
             self.log.info("[INIT] Terminating active Show Control process tree...")
-            kill_tree(show_proc)  # show_control runs in its own session, so this reaches its workers too
-                
+            kill_tree(show_proc)
+
         self.processes["show_control"] = None
 
     def release_all_universes(self, priority: int = None):
@@ -385,7 +373,6 @@ class InitializerNode:
         is_multicast = net_cfg.get("multicast", True)
 
         all_universe_frames = self._get_all_patched_universes()
-        target_universes = list(all_universe_frames.keys())
         self.stop_active_output()
 
         self.current_state = State.PANIC
@@ -414,7 +401,7 @@ class InitializerNode:
                     time.sleep(0.02)
                     sender.deactivate_output(u_id)
                 sender.stop()
-                
+
             except Exception as err:
                 self.log.error(f"[INIT] Failed to send panic blackout: {err}")
 
@@ -463,7 +450,7 @@ class InitializerNode:
                     time.sleep(0.02)
                     sender.deactivate_output(u_id)
                 sender.stop()
-                
+
             except Exception as err:
                 self.log.error(f"[INIT] All ON macro exception: {err}")
 
@@ -477,11 +464,11 @@ class InitializerNode:
             return
         self.stop_active_output()
         self.current_state = State.SHOW_RUNNING
-        
+
         target_playlist = playlist_name or self.config.get("system", {}).get("playlist_name", "Winter 2026")
         py_exe = sys.executable
         cmd = [py_exe, "src/show_control.py", "--config", str(self.config_path), "--playlist", target_playlist]
-        
+
         self.log.info(f"[INIT] Starting show control with playlist '{target_playlist}'...")
         self.processes["show_control"] = subprocess.Popen(cmd, start_new_session=True)
 
@@ -564,8 +551,6 @@ def make_ipc_handler(node: InitializerNode):
                 else:
                     self._send_json(400, {"error": f"Unknown macro action '{action}'"})
 
-            # In main.py -> IPCHandler.do_POST()
-
             elif self.path == "/api/show/register_workers":
                 pids = data.get("pids", [])
                 node.active_worker_pids = pids
@@ -602,27 +587,27 @@ def make_ipc_handler(node: InitializerNode):
                 if config_type == "playlist":
                     # No process restart needed; show_control reads playlist dynamically on run
                     self._send_json(200, {
-                        "status": "ok", 
+                        "status": "ok",
                         "message": "Playlist config updated. Will take effect on next play cycle."
                     })
 
                 elif config_type == "schedule":
                     node.restart_node("scheduler")
                     self._send_json(200, {
-                        "status": "ok", 
+                        "status": "ok",
                         "message": "Scheduler node process restarted with new schedule."
                     })
 
                 elif config_type == "patch":
                     node.restart_node("sacn_listener")
                     self._send_json(200, {
-                        "status": "ok", 
+                        "status": "ok",
                         "message": "sACN listener process restarted with new channel patch."
                     })
 
                 elif config_type == "main_config":
                     self._send_json(200, {
-                        "status": "ok", 
+                        "status": "ok",
                         "message": "Full system process stack reloading..."
                     })
                     node.restart_full_system()
@@ -647,7 +632,7 @@ def main():
         except Exception:
             pass
         return "INFO"
-    
+
     log = get_node_logger("main", load_log_level())
 
     node = InitializerNode(CONFIG_PATH, log)

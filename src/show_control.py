@@ -5,7 +5,7 @@ Master Show Controller Daemon
 Location: src/show_control.py
 
 Loads central configuration files (main_config.json, playlist.json, patch.json)
-to orchestrate audio streaming and sACN lighting sequences.
+to orchestrate audio playback and sACN lighting sequences.
 
 Usage:
     python3 src/show_control.py [-c config/main_config.json]
@@ -15,7 +15,6 @@ Optional main_config.json keys (all have defaults):
     system.sync.ready_timeout_s   max seconds to wait for workers to finish setup (default 60)
     system.sync.end_grace_s       extra seconds past the track's expected end (sequence/audio length +
                                   button_hold_s) before a stuck worker is killed (default 15)
-    system.broadcast.fm_enabled        false = no FM carrier; audio plays on local speakers (default true)
 """
 
 import sys
@@ -23,11 +22,11 @@ import os
 import time
 import json
 import signal
-import stat
 import struct
 import threading
 import subprocess
 import argparse
+import wave
 from pathlib import Path
 import urllib.request
 
@@ -45,6 +44,7 @@ DEFAULT_MAIN_CONFIG = PROJECT_ROOT / "config" / "main_config.json"
 
 # Where the web uploader stores files; used to resolve bare filenames in playlist.json
 ASSET_DIRS = {"audio": "showfiles/music", "sequence": "showfiles/sequences"}
+INIT_NODE_URL = "http://127.0.0.1:5001"
 
 def get_system_status() -> dict:
     """Queries Initializer Node for system state."""
@@ -57,7 +57,6 @@ def get_system_status() -> dict:
         return {}
 
 # Global Execution State
-fm_carrier_proc = None
 active_processes = []
 is_terminating = False
 sys_config = {}
@@ -156,7 +155,7 @@ def load_system_configs(args):
 def notify_current_track(now_playing: str, next_up: str):
     """Notify Initializer Node of current track state without heavy file I/O or extra threads."""
     try:
-        url = "http://127.0.0.1:5001/api/show/progress"
+        url = f"{INIT_NODE_URL}/api/show/progress"
         payload = json.dumps({"now_playing": now_playing, "next_up": next_up}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=1.0):
@@ -168,9 +167,6 @@ def notify_current_track(now_playing: str, next_up: str):
 # EMERGENCY PANIC & HARDWARE SAFETY
 # ==============================================================================
 
-INIT_NODE_URL = "http://127.0.0.1:5001"
-
-# GOOD: Local sACN blackout frame without IPC macro POSTs
 def send_sacn_blackout(universe=11, priority=100):
     """Sends a zero-value sACN blackout frame directly to the network."""
     try:
@@ -189,41 +185,25 @@ def send_sacn_blackout(universe=11, priority=100):
 
 def terminate_all_children():
     """
-    Instantly mass-kills all registered child processes AND their entire 
+    Instantly mass-kills all registered child processes AND their entire
     process groups using POSIX SIGKILL to prevent orphaned audio/sACN threads.
     """
-    global active_processes, fm_carrier_proc
+    global active_processes
 
     log.info("[SHOW CONTROL] Mass-terminating process groups...")
 
-    # 1. Kill active track worker process groups (audio + sACN)
     for proc in active_processes:
         if proc and proc.poll() is None:
             try:
                 if os.name != 'nt':
-                    # Send SIGKILL (-9) to the ENTIRE process group
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 else:
-                    # Windows fallback: taskkill /F /T terminates process tree
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], 
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 log.error(f"[SHOW CONTROL] Error killing process group {proc.pid}: {e}")
 
     active_processes.clear()
-
-    # 2. Terminate persistent FM carrier process group
-    if fm_carrier_proc and fm_carrier_proc.poll() is None:
-        try:
-            log.info("[SHOW CONTROL] Killing FM carrier process group...")
-            if os.name != 'nt':
-                os.killpg(os.getpgid(fm_carrier_proc.pid), signal.SIGKILL)
-            else:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(fm_carrier_proc.pid)], 
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            log.error(f"[SHOW CONTROL] Error killing FM carrier: {e}")
-        fm_carrier_proc = None
 
 
 def cleanup_and_exit(signum=None, frame=None):
@@ -239,16 +219,7 @@ def cleanup_and_exit(signum=None, frame=None):
     sig_name = signal.Signals(signum).name if signum else "INTERNAL_CLEANUP"
     log.info(f"\n[SHOW CONTROL] Signal received ({sig_name}). Executing immediate process group purge...")
 
-    # Nuke all child audio, sACN, and worker processes instantly
     terminate_all_children()
-
-    # Clean up FIFO pipe
-    fifo_path = "/tmp/fm_audio.au"
-    if os.path.exists(fifo_path):
-        try:
-            os.remove(fifo_path)
-        except OSError:
-            pass
 
     log.info("[SHOW CONTROL] All process groups terminated and hardware interfaces released. Exiting.")
     sys.exit(0)
@@ -272,80 +243,6 @@ def emergency_panic_latch(signum=None, frame=None):
 
     cleanup_and_exit(signum, frame)
 
-# ==============================================================================
-# FM TRANSMITTER CARRIER MANAGEMENT
-# ==============================================================================
-
-# Keep module-level variable so Python's GC doesn't close the file descriptor
-dummy_fifo_fd = None
-fm_carrier_proc = None
-
-def init_persistent_fm_carrier():
-    """Replicates the working CLI carrier setup cleanly in Python."""
-    global fm_carrier_proc, sys_config, dummy_fifo_fd
-
-    broadcast_cfg = sys_config.get("broadcast", {})
-    freq = broadcast_cfg.get("fm_frequency", 90.3)
-    ps_name = broadcast_cfg.get("rds_ps_name", "HOLIDAY")
-    rt_text = broadcast_cfg.get("rds_rt_default", "Lightshow")
-    fifo_path = broadcast_cfg.get("fifo_path", "/tmp/fm_audio.au")
-
-    if not broadcast_cfg.get("fm_enabled", True) or os.name == 'nt':
-        return
-
-    # Step 1: rm -f /tmp/fm_audio.*
-    if os.path.exists(fifo_path):
-        try:
-            os.remove(fifo_path)
-        except OSError:
-            pass
-
-    # Step 2: mkfifo /tmp/fm_audio.au
-    os.mkfifo(fifo_path)
-
-    # Step 3: fd = os.open('/tmp/fm_audio.au', os.O_RDWR)
-    # Using low-level os.open (O_RDWR | O_NONBLOCK) opens the write end instantly
-    # without blocking the main Python thread.
-    try:
-        dummy_fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
-        log.info(f"[INIT] Established persistent O_RDWR handle on {fifo_path} (fd={dummy_fifo_fd})")
-    except Exception as e:
-        log.error(f"[INIT] Failed to acquire persistent FIFO handle: {e}")
-        return
-
-    log.info(f"[INIT] Launching persistent FM carrier on {freq:.1f} MHz...")
-    fifo_read_fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
-
-    # Step 4: /usr/local/bin/pi_fm_rds -freq 90.3 -audio /tmp/fm_audio.au ...
-    fm_cmd = [
-        "/usr/local/bin/pi_fm_rds",
-        "-freq", str(freq),
-        "-audio", fifo_path,
-        "-ps", ps_name,
-        "-rt", rt_text
-    ]
-
-    fm_log_file = os.open("logs/pi_fm_rds.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-
-    # Pass close_fds=True to prevent pi_fm_rds from inheriting the dummy_fifo_fd handle
-    fm_carrier_proc = subprocess.Popen(
-        fm_cmd,
-        stdin=fifo_read_fd,
-        stdout=subprocess.DEVNULL,
-        stderr=fm_log_file,
-        close_fds=True,
-        start_new_session=True
-    )
-
-    os.close(fifo_read_fd)
-    os.close(fm_log_file)
-
-    # Give pi_fm_rds time to initialize DMA and open the reader side of the FIFO
-    time.sleep(1.0)
-
-    if fm_carrier_proc.poll() is not None:
-        log.error("[INIT] pi_fm_rds exited unexpectedly! Check logs/pi_fm_rds.log")
-
 
 # ==============================================================================
 # PLAYLIST EXECUTION LOOP
@@ -354,22 +251,37 @@ def init_persistent_fm_carrier():
 READY_TOKEN = "@@READY@@"
 
 
+def _get_audio_length_s(audio_path: str):
+    """Determine audio duration without requiring external CLI tools."""
+    if audio_path.lower().endswith(".wav"):
+        try:
+            with wave.open(audio_path, "rb") as wf:
+                return wf.getnframes() / float(wf.getframerate())
+        except Exception:
+            pass
+    try:
+        from audio_playback import audio_duration_s
+        return audio_duration_s(audio_path)
+    except Exception:
+        return None
+
+
 def check_track_lengths(audio_path, sequence_path):
     """Pre-flight: warn if the FSEQ and the audio file are different lengths."""
     try:
         with open(sequence_path, "rb") as f:
             hdr = f.read(32)
-        import struct
         frames = struct.unpack_from("<I", hdr, 14)[0]
         seq_s = frames * hdr[18] / 1000.0
-        out = subprocess.run(["soxi", "-D", audio_path], capture_output=True, text=True, timeout=10)
-        audio_s = float(out.stdout.strip())
+        audio_s = _get_audio_length_s(audio_path)
+        if audio_s is None:
+            return None, seq_s
     except Exception:
-        return None, None  # soxi missing / unreadable header: skip silently
+        return None, None  # unreadable header/audio: skip silently
     log.debug(f"[CHECK] audio {audio_s:.2f}s vs sequence {seq_s:.2f}s (difference {seq_s - audio_s:+.2f}s)")
     if abs(seq_s - audio_s) > 0.5:
         log.warning("[CHECK] WARNING: sequence and audio lengths differ by more than 0.5s. If the sequence is "
-              "SHORTER, the lights end early by design of the file (re-render/re-export in xLights).")
+                    "SHORTER, the lights end early by design of the file (re-render/re-export in xLights).")
     return audio_s, seq_s
 
 
@@ -405,7 +317,6 @@ def kill_process_group_instantly(proc):
     if not proc or proc.poll() is not None:
         return
 
-    # Close standard pipes to unblock _pump_output daemon threads
     for pipe in (proc.stdin, proc.stdout, proc.stderr):
         if pipe:
             try:
@@ -413,7 +324,6 @@ def kill_process_group_instantly(proc):
             except Exception:
                 pass
 
-    # Issue instant SIGKILL to the entire process group
     try:
         if os.name != 'nt':
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -431,7 +341,7 @@ def run_track(track_idx, playlist):
     status = get_system_status()
     current_state = status.get("system_state", "UNKNOWN")
     is_panicked = current_state == "PANIC"
-    
+
     if not (0 <= track_idx < total_tracks):
         log.error(f"[SHOW] Track index {track_idx} out of range.")
         return False
@@ -468,30 +378,21 @@ def run_track(track_idx, playlist):
     processes = []
     try:
         sync_cfg = sys_config.get("sync", {})
-        broadcast_cfg = sys_config.get("broadcast", {})
         lead_time_s = sync_cfg.get("lead_time_s", 1.0)          # runway between READY and T0
         ready_timeout_s = sync_cfg.get("ready_timeout_s", 60.0)  # max time for decode/setup
         end_grace_s = sync_cfg.get("end_grace_s", 15.0)          # hang guard once one worker finishes
-        fm_offset_s = current_track.get("audio_offset_s", 0.0)   # calibrate FM latency (+ = later)
-        speaker_offset_s = current_track.get("speaker_offset_s", 0.0)
-        rt_text = current_track.get("rds", broadcast_cfg['rds_rt_default'])
+        audio_offset_s = current_track.get("audio_offset_s", current_track.get("speaker_offset_s", 0.0))
 
         audio_script = os.path.join(SRC_DIR, "audio_playback.py")
         sacn_script = os.path.join(SRC_DIR, "sacn/sacn_transmitter.py")
         universe = sys_config.get("network", {}).get("sacn_universe", 1)
 
         button_hold = current_track.get("button_hold_s", 0)
+        light_speed = current_track.get("light_speed", 1.0)      # <1 slows lights (audio runs long)
 
-        light_speed = current_track.get("light_speed", 1.0)           # <1 slows lights (audio runs long)
-        if (sys_config.get("broadcast", {}).get("fm_enabled", True) and os.name != 'nt'
-                and (fm_carrier_proc is None or fm_carrier_proc.poll() is not None)):
-            log.error(f"[SHOW] FM carrier (pi_fm_rds) is NOT running; this track will not be broadcast. {_fm_log_tail()}")
         audio_s, seq_s = check_track_lengths(audio_path, sequence_path)
 
-        audio_cmd = [sys.executable, "-u", audio_script, audio_path,
-                     "--offset", str(fm_offset_s), "--speaker-offset", str(speaker_offset_s), "--rds-text", rt_text]
-        if not broadcast_cfg.get("fm_enabled", True):
-            audio_cmd.append("--no-fm")
+        audio_cmd = [sys.executable, "-u", audio_script, audio_path, "--offset", str(audio_offset_s)]
         sacn_cmd = [sys.executable, "-u", sacn_script, sequence_path, "--universe", str(universe),
                     "--button-hold", str(button_hold), "--multicast",
                     "--speed", str(light_speed)]
@@ -531,9 +432,6 @@ def run_track(track_idx, playlist):
 
         # Phase 3: Wait for completion or early abort signal
         first_exit = None
-        # Hang guard: a worker still running after the other exited is only killed once it is past the
-        # time the track should have taken (longest of audio/sequence + button hold) plus a grace period,
-        # so lights can't be cut off just because the audio side stopped early (e.g. no sound device).
         expected_s = max([x for x in (audio_s, seq_s) if x] or [0.0])
         hard_deadline = t0 + expected_s + float(button_hold) + end_grace_s
         while True:
@@ -548,7 +446,7 @@ def run_track(track_idx, playlist):
                 if now > max(hard_deadline, first_exit + end_grace_s):
                     laggard = "sacn" if audio_done else "audio"
                     log.warning(f"[SHOW] {laggard} worker still running well past the expected end of the track; "
-                          f"terminating it.")
+                                f"terminating it.")
                     break
             time.sleep(0.05)
 
@@ -590,18 +488,14 @@ def run_track(track_idx, playlist):
 
 def graceful_shutdown():
     """Clean, non-emergency shutdown for normal show completion."""
-    global fm_carrier_proc, sys_config
+    global sys_config
     log.info("\n[SHOW] Performing graceful show completion and blackout...")
-    
+
     # Issue standard Priority 100 blackout frame
     net_cfg = sys_config.get("network", {})
     universe = net_cfg.get("sacn_universe", 1)
     priority = net_cfg.get("priority_normal", 100)
     send_sacn_blackout(universe=universe, priority=priority)
-
-    # Terminate persistent FM process cleanly if running
-    if fm_carrier_proc and fm_carrier_proc.poll() is None:
-        fm_carrier_proc.terminate()
 
     log.info("[SHOW] Show engine stopped cleanly. Exiting with status 0.")
 
@@ -626,10 +520,8 @@ def main():
     log.info(f"[INIT] Loaded system configuration from: {os.path.abspath(args.config)}")
     log.info(f"[INIT] Playlist contains {len(playlist)} tracks.")
 
-    # Initialize persistent broadcast carrier
-    init_persistent_fm_carrier()
-
     show_failed = False
+    current_state = "UNKNOWN"
 
     try:
         for idx in range(len(playlist)):
@@ -639,12 +531,12 @@ def main():
             if current_state == "PANIC":
                 show_failed = True
                 break
-            success = run_track(idx, playlist)      
+            success = run_track(idx, playlist)
             if not success:
                 log.info(f"[SHOW CONTROL] Track index {idx} returned success=False. Aborting playlist loop.")
                 break
         else:
-            log.info("[SHOW CONTROL] Completed all tracks in playlist successfully.")            
+            log.info("[SHOW CONTROL] Completed all tracks in playlist successfully.")
 
     except Exception as e:
         log.error(f"[SHOW CONTROL] Unexpected exception in main show loop: {e}")
