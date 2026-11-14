@@ -381,7 +381,7 @@ def run_track(track_idx, playlist):
         lead_time_s = sync_cfg.get("lead_time_s", 1.0)          # runway between READY and T0
         ready_timeout_s = sync_cfg.get("ready_timeout_s", 60.0)  # max time for decode/setup
         end_grace_s = sync_cfg.get("end_grace_s", 15.0)          # hang guard once one worker finishes
-        audio_offset_s = current_track.get("audio_offset_s", current_track.get("speaker_offset_s", 0.0))
+        audio_offset_s = current_track.get("audio_offset_s", 0.0)
 
         audio_script = os.path.join(SRC_DIR, "audio_playback.py")
         sacn_script = os.path.join(SRC_DIR, "sacn/sacn_transmitter.py")

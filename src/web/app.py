@@ -424,9 +424,7 @@ def upload_show_files():
             "button_hold_s": 1.5,
             "post_delay_s": 3.0,
             "audio_offset_s": 0.0,
-            "speaker_offset_s": 0.0,
             "light_speed": 1.0,
-            "rds": Path(audio_name).stem.replace("_", "").title()
         }
 
         for pl_name in target_playlists:

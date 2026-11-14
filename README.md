@@ -11,7 +11,8 @@ A lightweight lightshow system intended to run on a Raspberry Pi. Supports a web
 - **Web App** Includes a Vue app with a system dashboard, JSON editors for playlist, sACN patch, schedule, and system settings files.
 - **Remote Console** The Vue app includes a simple console designed to be used as an RFU (Remote Focus Unit) using industry-standard syntax.
 - **Modular Design** The system consists of individual nodes, allowing parts of it to run on separate machines.
-- **Compatible with Windows** While intended to run on Raspberry Pi OS, this system will run on Windows except for FM broadcast and GPIO output
+- **Compatible with Windows** While intended to run on Raspberry Pi OS, this system will run on Windows except for GPIO output
+- **Audio Playback** Play music for your show using external speakers or an FM transmitter module (I use this one from [Amazon](https://www.amazon.com/XIITIA-Transmitter-Microphone-Multi-Function-Modulation/dp/B0CHJ1KSTF))
 
 ## Project Structure
 
@@ -36,7 +37,7 @@ sacn-lightshow/
 │       └── sacn_transmitter.py   # Transmits data from a .fseq file over sACN
 │   ├── web/
 │       └── app.py                # Hosts the Vue app and responds to API calls
-│   ├── audio_playback.py         # Plays an audio file over speakers or FM broadcast via GPIO4
+│   ├── audio_playback.py         # Plays an audio file over speakers or FM broadcast via external transmitter
 │   ├── logger_setup.py           # Helper to initialize the logger for all nodes
 │   ├── main.py                   # Entry-point for all nodes, also handles macros and keep-alive for each node
 │   ├── scheduler.py              # Reads schedule.json and sends the scheduled macros at the listed dates/times
@@ -64,6 +65,7 @@ Create/edit config/main_config.json and config/patch.json
 
 Start the system: `python3 src/main.py`
 Or if using systemctl:
+
 ```
 sudo systemctl daemon-reload
 sudo systemctl enable lightshow.service
@@ -86,13 +88,6 @@ The `main_config.json` file contains system settings, including the paths to oth
     "services": {                         # Use this to disable services
       "sacn_listener": true,
       "scheduler": true
-    },
-    "broadcast": {
-      "fm_enabled": true,
-      "fm_frequency": 90.3,
-      "rds_ps_name": "HOLIDAY",
-      "rds_rt_default": "Lightshow",
-      "fifo_path": "/tmp/fm_audio.fifo"    # Path to persistent FIFO file
     },
     "sync": {
       "lead_time_s": 1.0,        # How long to wait after services are ready before starting the track
@@ -313,10 +308,8 @@ This is a playlist-based system, so everything related to the show is defined in
     "title": ""                 # The title to display in the Vue app
     "button_hold_s": 0.0        # How long to hold the final frame of the sequence (the 'button' cue)
     "post_delay_s": 0.0         # How long to wait before playing the next track
-    "audio_offset_s": 0.0       # How much to shift FM audio vs lights (+ is later)
-    "speaker_offset_s": 0.0     # How much to shift speaker audio vs lights (+ is later)
+    "audio_offset_s": 0.0       # How much to shift audio vs lights (+ is later)
     "light_speed": 1.0          # Speed multiplier for sequence playback
-    "rds": ""                   # Description text to display via RDS
   }
 ]
 ```

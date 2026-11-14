@@ -100,7 +100,7 @@ const onSubmit = async () => {
   }
 
   const formData = new FormData()
-  const validAudioExtensions = ['.wav']
+  const validAudioExtensions = ['.wav', '.mp3', '.ogg', '.flac']
   const validLightsExtensions = ['.fseq']
   const audioExt = state.audio?.name.slice(state.audio.name.lastIndexOf('.')).toLowerCase() || ''
   const lightsExt = state.lights?.name.slice(state.lights.name.lastIndexOf('.')).toLowerCase() || ''
@@ -113,7 +113,7 @@ const onSubmit = async () => {
 
   try {
     if (!validAudioExtensions.includes(audioExt)) {
-      throw new Error('[Audio] Please upload a valid audio file (.wav)')
+      throw new Error('[Audio] Please upload a valid audio file (.wav, .mp3, .ogg, or .flac)')
     }
 
     if (!validLightsExtensions.includes(lightsExt)) {
@@ -195,9 +195,9 @@ useSeoMeta({
       <UFormField name="audio">
         <UFileUpload
           v-model="state.audio"
-          accept="audio/wav"
+          accept="audio/wav,audio/mp3,audio/ogg,audio/flac"
           label="Drop Music File Here"
-          description="MP3 or WAV"
+          description="WAV, MP3, OGG, or FLAC"
           icon="i-lucide-music"
           size="md"
           layout="list"
@@ -207,7 +207,7 @@ useSeoMeta({
       <UFormField name="lights">
         <UFileUpload
           v-model="state.lights"
-          accept="application/fseq"
+          accept=".fseq"
           label="Drop Sequence File Here"
           description="xLights FSEQ File"
           icon="i-lucide-spotlight"
